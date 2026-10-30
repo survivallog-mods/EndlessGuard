@@ -67,8 +67,13 @@ internal static class ArrowTower
         // 四表任一丢 99005 或 Lv4 丢解锁项即全量重放（Inject 内部逐行 ContainsKey/Contains 幂等，重放无副作用）
         bool rowsMissing = !td.ContainsKey(Id) || !fu.ContainsKey(Id) || !it.ContainsKey(Id) || !pl.ContainsKey(Id);
         bool lv4Missing = !dl.TryGetValue(DefenseLvKey, out var lv4) || lv4 == null || !Contains(lv4.unlock_recipes, Id);
-        if (!rowsMissing && !lv4Missing) return;
+        if (!rowsMissing && !lv4Missing)
+        {
+            ArrowTowerModel.EnsureRegistered();   // 表齐后的稳态轮挂模型注册（幂等，建一次+核验补丁；T7）
+            return;
+        }
         Inject(td, fu, it, pl, dl);
+        ArrowTowerModel.EnsureRegistered();       // 注入完成轮同样尝试（幂等；模板尚未建成功时提前一轮）
     }
 
     /// <summary>注入/修复四行 + Lv4 登记。行级幂等：行已存在则跳过建行仅无条件拍平显示/数值字段
