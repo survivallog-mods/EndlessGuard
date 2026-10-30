@@ -194,7 +194,7 @@
 | 表 | ID | 关键内容 |
 |---|---|---|
 | Config_TowerDevice | **99005** | §4.1 数值 |
-| Config_Furniture | **99005** | 名称「箭塔」；`ResName=P_Tripo05`；`SlotType=10`；`FsmName=Agent/Furniture_TowerDevice`；`FurnitureFunc=[9121,9122]`；`InstallTime=1800`；`isShowHP=true`；描述「固定在木架上的连发弩，自动射击范围内的丧尸。」 |
+| Config_Furniture | **99005** | 名称「箭塔」；`ResName=P_Tripo05`；`SlotType=10`；`FsmName=Agent/Furniture_TowerDevice`；`FurnitureFunc=[9121,9122]`；`InstallTime=1800`；`isShowHP=true`；描述「固定在木架上的连发弩，自动射击范围内的丧尸。高攻速射，但脆弱易损。」 |
 | Config_Item（包裹） | **99005** | 「箭塔包裹」，`TargetFurnitureID=99005`，`Category=14`，Model/图标先复用电锯包裹（同 `P_WoodBox_02`） |
 | Config_ProductionList（配方） | **99005** | 「箭塔包裹」＝木片×2 + 铁皮×1 + 碎玻璃×1（比电锯 2玻璃+2铁皮略省金属、多用木材）；`Level=1`；`defense_exp=25`（电网20/电锯30 之间）；`LifeMin=80`；`ProductID=[99005]` |
 | Config_DefenseLv.Lv4 | 修改 | `unlock_recipes [403] → [403, 99005]`（与电锯同档解锁；Lv4 文案追加「新增：解锁 箭塔」） |
