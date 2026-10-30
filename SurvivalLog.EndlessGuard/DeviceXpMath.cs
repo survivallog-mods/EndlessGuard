@@ -74,4 +74,36 @@ internal static class DeviceXpMath
 
     /// <summary>受击是否缩放伤害入参：真实受击缩放；修理（isRepair=true）不缩放（spec §3.4 前缀门）。</summary>
     internal static bool ShouldScaleIncomingDamage(bool isRepair) => !isRepair;
+
+    // ===== Task 4 巡检漂移判定（纯函数：live 值 vs 该级目标值；测试工程单文件链接可直测）=====
+
+    /// <summary>浮点判定容差：写回后本应位相等，容差只吸收游戏侧重算/序列化的浮点抖动；
+    /// 1e-4 远小于任何一格成长步长（最小射程步 0.55 格），不会把真实成长误判为无漂移。</summary>
+    private const float FloatEps = 1e-4f;
+
+    /// <summary>攻击面板漂移：live ≠ TargetAttack(base, lv)（int 直比）。</summary>
+    internal static bool AttackDrifts(int baseAtk, int lv, int liveAtk) =>
+        liveAtk != TargetAttack(baseAtk, lv);
+
+    /// <summary>攻击间隔漂移：|live − TargetInterval(base, lv)| > 容差。</summary>
+    internal static bool IntervalDrifts(float baseInt, int lv, float liveInt) =>
+        Math.Abs(liveInt - TargetInterval(baseInt, lv)) > FloatEps;
+
+    /// <summary>目标射程平方（RangeSqr 口径，spec §4.1）：对 base 开方取 TargetRange 再平方。
+    /// ApplyLevel 写回与巡检漂移判定共用此一处的开方/平方换算（杜绝两套算式各自漂移）。</summary>
+    internal static float TargetRangeSqr(float baseRangeSqr, int lv)
+    {
+        var baseRange = (float)Math.Sqrt(Math.Max(0f, baseRangeSqr));
+        var r = TargetRange(baseRange, lv);
+        return r * r;
+    }
+
+    /// <summary>箭塔射程漂移（RangeSqr 口径）：|live − TargetRangeSqr(base, lv)| > 容差。</summary>
+    internal static bool RangeDrifts(float baseRangeSqr, int lv, float liveRangeSqr) =>
+        Math.Abs(liveRangeSqr - TargetRangeSqr(baseRangeSqr, lv)) > FloatEps;
+
+    /// <summary>最大耐久漂移：只判 live &lt; TargetMaxHp 方向——ApplyLevel 只加不减，live&gt;target 时
+    /// 无法收敛，判了只会每 2s 永久 trace 刷屏（读档已含上会话成长且基线偏高属 spec §6 认可的已知让步）。</summary>
+    internal static bool MaxHpDrifts(int baseHp, int stepAbs, int lv, int liveMaxHp) =>
+        liveMaxHp < TargetMaxHp(baseHp, lv, stepAbs);
 }

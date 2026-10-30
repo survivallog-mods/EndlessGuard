@@ -25,6 +25,9 @@ namespace SurvivalLog.EndlessGuard;
 ///   （interop 公开 getter，FallRestorer._TagManager 同款已验证模式）→ AgentManager.GetAgent(long) → TryCast&lt;Furniture&gt;()，
 ///   Furniture.AgentConfigId(int)=家具配置 id（BaseAgent 继承）。组件按 Type 索引直达：agentComponentDictionary[
 ///   Il2CppType.From(typeof(T))]（CabinetCatalog.ReadTagIds 已验证模式，无泛型/枚举坑）。
+/// ②b 在场枚举（Task 4 实证）：AgentManager : BaseEntity 非 BaseSingleton（dump.cs 374312 行），属主仍是
+///   BattleLogicWorld._AgentManager（同上公开 getter）→ GetAllAgent():Il2CppList&lt;BaseAgent&gt;（interop 公开无参，
+///   mdump 实测）→ 过滤 BaseAgent.IsDead → TryCast&lt;Furniture&gt; → AgentConfigId ∈ IsTrackedDevice。
 /// ③ 数值：Zombie.CurrentHP/MaxHP(int 公开)、BaseEntity.InstanceId(long 公开)、TowerDeviceComponent.Attack/
 ///   AttackIntervalSeconds/AttackRangeSqr get+set 公开、FurnitureDurabilityComponent.CurrentDurability/MaxDurability 公开、
 ///   AddMaxDurability/AddCurrentDurability(Void(Int32))。
@@ -105,10 +108,96 @@ internal static class DeviceXpRuntime
         Array.ConvertAll(DeviceXpMath.ThresholdsDefault,
             t => (int)Math.Round(t * XpThresholdScale, MidpointRounding.AwayFromZero));
 
-    /// <summary>Task 4 巡检入口（裁决：本任务留空桩，T4 填充——读 _dirty 决定 Save 等）。</summary>
+    /// <summary>上一步巡检时见到的存档槽标识（slot 切换检测基线；初值=冷启动 SlotKey，首步不误触发清场）。</summary>
+    private static string _stepSlot = SlotKey;
+
+    /// <summary>
+    /// Task 4 巡检入口（GuardTicker 每 2s 调一次，spec §3.6 读档重放+幂等校准）：
+    /// ① RefreshSlotKey 后比对上步值——不同=发生读档/换档 → 清基线快照。快照按家具实例 id 键控：
+    ///    换档后 id 集合不同，陈旧条目本是无害垃圾；但同档重进时 id 可能复用，旧基线可能已是"含成长"
+    ///    的值（首次 ApplyLevel 前拍的快照在上一会话早已落袋），清空更安全且只是托管 Dictionary.Clear，开销可忽略。
+    /// ② _dirty → Store.Save() 后清旗（裁决的存档时机设计：入账只置脏，巡检统一落盘，无逐事件磁盘写）；
+    ///    Save 抛异常（磁盘病态）则旗不清，下个 2s 自动重试。
+    /// ③ 重放对账：读档后官方按配置重快照面板值（修理路径同理会回写原厂值），逐台把 live 组件值与
+    ///    "账本等级+基线"算出的目标值比对，有漂移才 ApplyLevel 重放并 trace 一行（spec §3.4 逐字格式，
+    ///    每修正台一行）。幂等：无漂移零写零 trace；重放复用 ApplyLevel（与升级同一写路径，不另起灶）。
+    /// 全程 try/catch（单台异常不拖累其余台，轮询容器不炸）。
+    /// </summary>
     public static void OnStep()
     {
-        // T4 实现
+        try
+        {
+            if (!GateOn()) return;
+
+            // ① slot 上下文失效检测（读档/换档）
+            RefreshSlotKey();
+            if (!string.Equals(SlotKey, _stepSlot, StringComparison.Ordinal))
+            {
+                _stepSlot = SlotKey;
+                Bases.Clear();
+            }
+
+            // ② 脏账本落盘冲刷（成功才清旗，失败下步重试）
+            if (_dirty)
+            {
+                Store.Save();
+                _dirty = false;
+            }
+
+            // ③ 在场设备逐台对账重放（Lv1 无成长可放，账本无条目同）
+            foreach (var f in DevicesInPlay())
+            {
+                try
+                {
+                    var cfgId = f.AgentConfigId;
+                    var cellKey = CellKeyOf(f);
+                    if (!Store.TryGet(SlotKey, cfgId, cellKey, out var e) || e == null || e.Lv <= 1) continue;
+                    var lv = e.Lv;
+                    var tower = GetComponent<TowerDeviceComponent>(f);
+                    var dura = GetComponent<FurnitureDurabilityComponent>(f);
+                    var b = GetOrCaptureBase(f.InstanceId, tower, dura);   // 首见即拍（读档重置后的原厂值恰是合法基线，与 Task 3 让步一致）
+                    if (b == null) continue;
+                    var drifted =
+                        (IsWeaponClass(cfgId) && tower != null && (
+                            DeviceXpMath.AttackDrifts(b.Attack, lv, tower.Attack) ||
+                            DeviceXpMath.IntervalDrifts(b.Interval, lv, tower.AttackIntervalSeconds) ||
+                            (cfgId == ArrowTowerCfgId && DeviceXpMath.RangeDrifts(b.RangeSqr, lv, tower.AttackRangeSqr)))) ||
+                        (dura != null && b.MaxHp > 0 &&
+                            DeviceXpMath.MaxHpDrifts(b.MaxHp, DeviceXpMath.StepAbs(b.MaxHp, HpStepRatioFor(cfgId)), lv, dura.MaxDurability));
+                    if (!drifted) continue;
+                    ApplyLevel(f, lv);   // 唯一写路径：与升级生效共用
+                    EndlessGuardPlugin.Trace("[XP] recal cfg=" + cfgId + " lv=" + lv);   // spec §3.4 逐字格式
+                }
+                catch (Exception e) { EndlessGuardPlugin.Trace("[XP] recal probe: " + e.Message); }
+            }
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[XP] step: " + e.Message); }
+    }
+
+    /// <summary>在场受追踪家具枚举：BaseSingleton&lt;BattleLogicWorld&gt;._AgentManager.GetAllAgent()
+    /// （interop 实证：AgentManager : BaseEntity 非单例，属主=BattleLogicWorld._AgentManager 公开 getter，
+    /// 与 ResolveFurniture 同源；GetAllAgent():Il2CppList&lt;BaseAgent&gt; 公开无参）。过滤 IsDead、TryCast&lt;Furniture&gt;、
+    /// IsTrackedDevice。世界未建/列表不可达=空枚举（主菜单静默零开销）。</summary>
+    private static IEnumerable<Furniture> DevicesInPlay()
+    {
+        if (!GameCore.HotUpdate.BaseSingleton<BattleLogicWorld>.IsInstanceCreated) yield break;
+        Il2CppSystem.Collections.Generic.List<BaseAgent> all = null;
+        try { all = GameCore.HotUpdate.BaseSingleton<BattleLogicWorld>.Instance?._AgentManager?.GetAllAgent(); }
+        catch { yield break; }
+        if (all == null) yield break;
+        for (int i = 0; i < all.Count; i++)
+        {
+            Furniture f = null;
+            try
+            {
+                var a = all[i];
+                if (a == null || a.IsDead) continue;
+                f = a.TryCast<Furniture>();
+                if (f == null || !DeviceXpMath.IsTrackedDevice(f.AgentConfigId)) continue;
+            }
+            catch { continue; }   // 单个 il2cpp 代理病态不拖垮整轮巡检
+            yield return f;
+        }
     }
 
     /// <summary>存档槽标识刷新：GameSaveManager.GetLastPlayFileName（interop 无字面 SaveFileName，取同型公开成员；
@@ -187,9 +276,7 @@ internal static class DeviceXpRuntime
                 tower.AttackIntervalSeconds = DeviceXpMath.TargetInterval(b.Interval, lv);
                 if (cfgId == ArrowTowerCfgId)
                 {
-                    var baseRange = (float)Math.Sqrt(Math.Max(0f, b.RangeSqr));
-                    var r = DeviceXpMath.TargetRange(baseRange, lv);
-                    tower.AttackRangeSqr = r * r;   // brief：AttackRangeSqr(=TargetRange²)
+                    tower.AttackRangeSqr = DeviceXpMath.TargetRangeSqr(b.RangeSqr, lv);   // brief：AttackRangeSqr(=TargetRange²)，与巡检判定同一换算
                 }
             }
             if (dura != null && b.MaxHp > 0)

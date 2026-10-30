@@ -85,5 +85,6 @@ internal sealed class GuardTicker : MonoBehaviour
         _acc = 0;
         if (EndlessGuardPlugin.Enabled != null && !EndlessGuardPlugin.Enabled.Value) return;   // 总开关关=轮询停（已生效改动保留，重启干净）
         try { ScavengePlans.OnConfigStep(); } catch (Exception e) { EndlessGuardPlugin.Trace("ticker ScavengePlans: " + e.Message); }
+        try { DeviceXpRuntime.OnStep(); } catch (Exception e) { EndlessGuardPlugin.Trace("ticker DeviceXp: " + e.Message); }
     }
 }

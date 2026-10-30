@@ -166,4 +166,45 @@ public class DeviceXpMathTests
     {
         Assert.Equal(expected, DeviceXpMath.ShouldScaleIncomingDamage(isRepair));
     }
+
+    // ---- Task 4 巡检漂移判定（读档重放/幂等校准的纯判定核） ----
+
+    [Theory]
+    [InlineData(12, 3, 12, false)]   // Lv3 目标=12×1.15²≈15.87→16；live=12（读档被官方重置）→漂移
+    [InlineData(12, 3, 16, true)]    // live 已是目标 → 无漂移（幂等：不写不 trace）
+    [InlineData(12, 3, 15, false)]   // live=15 vs 目标 16 → 漂移
+    public void AttackDrifts_ComparesAgainstLevelTarget(int baseAtk, int lv, int liveAtk, bool expectedNoDrift)
+    {
+        Assert.Equal(expectedNoDrift, !DeviceXpMath.AttackDrifts(baseAtk, lv, liveAtk));
+    }
+
+    [Fact]
+    public void IntervalDrifts_EqualWithinEpsilon()
+    {
+        var target = DeviceXpMath.TargetInterval(2f, 3);        // 2×0.92²≈1.6928
+        Assert.False(DeviceXpMath.IntervalDrifts(2f, 3, target));            // 写回值=目标 → 无漂移
+        Assert.False(DeviceXpMath.IntervalDrifts(2f, 3, target + 5e-5f));    // 容差内抖动 → 无漂移（防永久 recal）
+        Assert.True(DeviceXpMath.IntervalDrifts(2f, 3, 2f));                 // 被官方重置回原厂 → 漂移
+    }
+
+    [Fact]
+    public void TargetRangeSqr_RoundTripsApplyLevelWrite()
+    {
+        // 写回口径自洽：ApplyLevel 写 TargetRangeSqr(base,lv)，巡检判 live≠同一函数 → 必收敛
+        var b = 3.0f * 3.0f;                                    // 基线 RangeSqr=9（3 格）
+        var lv5 = DeviceXpMath.TargetRangeSqr(b, 5);            // 3+4×0.55=5.2 → 5.2²=27.04
+        Assert.InRange(lv5, 27.03f, 27.05f);
+        Assert.False(DeviceXpMath.RangeDrifts(b, 5, lv5));      // 写回后读回 → 无漂移
+        Assert.True(DeviceXpMath.RangeDrifts(b, 5, b));         // 重置回原厂 → 漂移
+        Assert.Equal(0f, DeviceXpMath.TargetRangeSqr(-1f, 1));  // 负基线钳 0（防 NaN 传染；Lv1 目标=0）
+    }
+
+    [Fact]
+    public void MaxHpDrifts_OnlyLowSideFlags()
+    {
+        var b = 100; var step = DeviceXpMath.StepAbs(b, 0.15f);  // 15（箭塔比率，spec §4.1）
+        Assert.True(DeviceXpMath.MaxHpDrifts(b, step, 3, 100));   // 重置回原厂 100 < 目标 130 → 漂移
+        Assert.False(DeviceXpMath.MaxHpDrifts(b, step, 3, 130));  // 已达目标 → 无漂移
+        Assert.False(DeviceXpMath.MaxHpDrifts(b, step, 3, 140));  // 高于目标不判（ApplyLevel 只加不减，判了永不收敛只刷 trace）
+    }
 }
