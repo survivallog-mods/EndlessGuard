@@ -111,16 +111,29 @@ internal static class DeviceXpRuntime
     /// <summary>上一步巡检时见到的存档槽标识（slot 切换检测基线；初值=冷启动 SlotKey，首步不误触发清场）。</summary>
     private static string _stepSlot = SlotKey;
 
+    /// <summary>校准熔断器（评审 I1）：按家具实例 id 一台一份，与基线快照同生命周期（槽切换同清；
+    /// 设备重建/换 id 天然新态）。连续 3 步 recal 未收敛 → 第 4 次起压制该校准写（封死官方钳制
+    /// MaxDurability 时的每 2s 回血循环），halt 行每设备只打一次。</summary>
+    private static readonly Dictionary<long, RecalFuse> Fuses = new();
+
+    private static RecalFuse FuseOf(long ownerId)
+    {
+        if (!Fuses.TryGetValue(ownerId, out var fu) || fu == null) { fu = new RecalFuse(); Fuses[ownerId] = fu; }
+        return fu;
+    }
+
     /// <summary>
     /// Task 4 巡检入口（GuardTicker 每 2s 调一次，spec §3.6 读档重放+幂等校准）：
-    /// ① RefreshSlotKey 后比对上步值——不同=发生读档/换档 → 清基线快照。快照按家具实例 id 键控：
-    ///    换档后 id 集合不同，陈旧条目本是无害垃圾；但同档重进时 id 可能复用，旧基线可能已是"含成长"
-    ///    的值（首次 ApplyLevel 前拍的快照在上一会话早已落袋），清空更安全且只是托管 Dictionary.Clear，开销可忽略。
+    /// ① RefreshSlotKey 后比对上步值——不同=发生读档/换档 → 清基线快照与校准熔断器（同生命周期）。
+    ///    快照按家具实例 id 键控：换档后 id 集合不同，陈旧条目本是无害垃圾；但同档重进时 id 可能复用，
+    ///    旧基线可能已是"含成长"的值（首次 ApplyLevel 前拍的快照在上一会话早已落袋），清空更安全且只是
+    ///    托管 Dictionary.Clear，开销可忽略。
     /// ② _dirty → Store.Save() 后清旗（裁决的存档时机设计：入账只置脏，巡检统一落盘，无逐事件磁盘写）；
     ///    Save 抛异常（磁盘病态）则旗不清，下个 2s 自动重试。
     /// ③ 重放对账：读档后官方按配置重快照面板值（修理路径同理会回写原厂值），逐台把 live 组件值与
     ///    "账本等级+基线"算出的目标值比对，有漂移才 ApplyLevel 重放并 trace 一行（spec §3.4 逐字格式，
     ///    每修正台一行）。幂等：无漂移零写零 trace；重放复用 ApplyLevel（与升级同一写路径，不另起灶）。
+    ///    连续 3 步未收敛的设备由 RecalFuse 熔断压制（评审 I1，防钳制回血循环）。
     /// 全程 try/catch（单台异常不拖累其余台，轮询容器不炸）。
     /// </summary>
     public static void OnStep()
@@ -135,6 +148,7 @@ internal static class DeviceXpRuntime
             {
                 _stepSlot = SlotKey;
                 Bases.Clear();
+                Fuses.Clear();   // 熔断器与基线同生命周期：换档=新会话，压制态一并复位（评审 I1）
             }
 
             // ② 脏账本落盘冲刷（成功才清旗，失败下步重试）
@@ -153,9 +167,10 @@ internal static class DeviceXpRuntime
                     var cellKey = CellKeyOf(f);
                     if (!Store.TryGet(SlotKey, cfgId, cellKey, out var e) || e == null || e.Lv <= 1) continue;
                     var lv = e.Lv;
+                    var ownerId = f.InstanceId;
                     var tower = GetComponent<TowerDeviceComponent>(f);
                     var dura = GetComponent<FurnitureDurabilityComponent>(f);
-                    var b = GetOrCaptureBase(f.InstanceId, tower, dura);   // 首见即拍（读档重置后的原厂值恰是合法基线，与 Task 3 让步一致）
+                    var b = GetOrCaptureBase(ownerId, tower, dura);   // 首见即拍（读档重置后的原厂值恰是合法基线，与 Task 3 让步一致）
                     if (b == null) continue;
                     var drifted =
                         (IsWeaponClass(cfgId) && tower != null && (
@@ -164,7 +179,17 @@ internal static class DeviceXpRuntime
                             (cfgId == ArrowTowerCfgId && DeviceXpMath.RangeDrifts(b.RangeSqr, lv, tower.AttackRangeSqr)))) ||
                         (dura != null && b.MaxHp > 0 &&
                             DeviceXpMath.MaxHpDrifts(b.MaxHp, DeviceXpMath.StepAbs(b.MaxHp, HpStepRatioFor(cfgId)), lv, dura.MaxDurability));
-                    if (!drifted) continue;
+                    var fuse = FuseOf(ownerId);
+                    if (!drifted) { fuse.OnConverged(); continue; }   // 幂等：无漂移零写零 trace（连续计数归零）
+                    if (!fuse.OnTrigger())                            // 熔断中（评审 I1）：本会话压制该校准写——
+                    {                                                 // 防官方钳制 MaxDurability 时每 2s ApplyLevel→AddCurrent 无限回血
+                        if (!fuse.HaltTraced)
+                        {
+                            fuse.HaltTraced = true;
+                            EndlessGuardPlugin.Trace("[XP] recal-halt cfg=" + cfgId + " owner=" + ownerId + " 连续3次未收敛，暂停校准（疑似官方钳制MaxDurability，待实机取证）");
+                        }
+                        continue;
+                    }
                     ApplyLevel(f, lv);   // 唯一写路径：与升级生效共用
                     EndlessGuardPlugin.Trace("[XP] recal cfg=" + cfgId + " lv=" + lv);   // spec §3.4 逐字格式
                 }

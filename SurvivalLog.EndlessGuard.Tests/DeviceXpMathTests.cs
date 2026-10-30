@@ -207,4 +207,44 @@ public class DeviceXpMathTests
         Assert.False(DeviceXpMath.MaxHpDrifts(b, step, 3, 130));  // 已达目标 → 无漂移
         Assert.False(DeviceXpMath.MaxHpDrifts(b, step, 3, 140));  // 高于目标不判（ApplyLevel 只加不减，判了永不收敛只刷 trace）
     }
+
+    // ---- 评审 I1：校准熔断器（连续 3 次不收敛即停，封死潜在回血循环） ----
+
+    [Fact]
+    public void RecalFuse_TripsAfterThreeConsecutiveTriggers()
+    {
+        var fuse = new RecalFuse();
+        Assert.True(fuse.OnTrigger());    // 第 1 次写
+        Assert.True(fuse.OnTrigger());    // 第 2 次写
+        Assert.True(fuse.OnTrigger());    // 第 3 次写（熔断在本次计满后生效）
+        Assert.False(fuse.OnTrigger());   // 第 4 次起压制（不再写）
+        Assert.False(fuse.OnTrigger());   // 持续压制（本会话内不解除）
+        Assert.False(fuse.OnTrigger());
+    }
+
+    [Fact]
+    public void RecalFuse_ConvergeResetsStreak_ButNotTrip()
+    {
+        var fuse = new RecalFuse();
+        fuse.OnTrigger(); fuse.OnTrigger(); fuse.OnTrigger();   // 计满熔断
+        fuse.OnConverged();                                     // 某步无漂移：连续性归零
+        Assert.False(fuse.OnTrigger());                         // 但熔断态保持——"本会话内暂停"
+        var fresh = new RecalFuse();
+        fresh.OnTrigger(); fresh.OnTrigger();
+        fresh.OnConverged();                                    // 未熔断时收敛：旧连续计数不牵连下一轮
+        Assert.True(fresh.OnTrigger());                         // 重新累计（新一轮第 1 次）
+        Assert.True(fresh.OnTrigger());                         // 第 2 次
+        Assert.True(fresh.OnTrigger());                         // 第 3 次
+        Assert.False(fresh.OnTrigger());                        // 新一轮第 4 次压制
+    }
+
+    [Fact]
+    public void RecalFuse_ResetLiftsTrip()
+    {
+        var fuse = new RecalFuse();
+        fuse.OnTrigger(); fuse.OnTrigger(); fuse.OnTrigger();
+        Assert.False(fuse.OnTrigger());   // 已压制
+        fuse.Reset();                     // 槽切换/设备重建（换 id 天然新态）
+        Assert.True(fuse.OnTrigger());    // 计数复位后恢复校准
+    }
 }

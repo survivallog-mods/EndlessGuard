@@ -107,3 +107,41 @@ internal static class DeviceXpMath
     internal static bool MaxHpDrifts(int baseHp, int stepAbs, int lv, int liveMaxHp) =>
         liveMaxHp < TargetMaxHp(baseHp, lv, stepAbs);
 }
+
+/// <summary>
+/// 校准熔断器状态机（评审 I1；纯托管，Tests 单文件链接可直测）：按设备（owner 实例 id）跟踪
+/// 连续未收敛次数。是否真被官方钳制只有实机能证，但代码侧先封死爆炸路径：若 AddMaxDurability
+/// 内部钳制（如不超过配置上限），校准会永不收敛 → 每 2s 反复 ApplyLevel → 每次又 AddCurrentDurability
+/// = 无限回血漏洞。规则：连续 3 次触发 recal 后第 4 次起压制写（本会话内）；某步无漂移即收敛，
+/// 连续计数归零但已熔断态不解除；仅槽切换/设备重建（新 id）由调用方 Reset 全复位。
+/// 正常路径（读档一次性重快照→一次校准即收敛）计数最多到 1，完全不受影响。
+/// </summary>
+internal sealed class RecalFuse
+{
+    /// <summary>连续触发多少次后熔断（评审 I1 定值 3）。</summary>
+    internal const int TripAfter = 3;
+
+    private int _streak;                       // 连续触发 recal 的步数（无漂移步归零）
+    private bool _tripped;                     // 熔断态：本会话内不因收敛解除，仅 Reset 解除
+
+    /// <summary>调用方标记 halt 行已打过（每设备只打一次；追踪用纯调用方字段，不参与判定）。</summary>
+    public bool HaltTraced;
+
+    /// <summary>本步漂移触发：返回是否还允许 ApplyLevel 写；未熔断时计数 +1，计满即熔断。</summary>
+    public bool OnTrigger()
+    {
+        if (_tripped) return false;
+        if (++_streak >= TripAfter) _tripped = true;
+        return true;
+    }
+
+    /// <summary>本步无漂移（收敛）：连续计数归零；熔断态保持（"本会话内暂停"语义）。</summary>
+    public void OnConverged() => _streak = 0;
+
+    /// <summary>全复位（槽切换/设备重建=换 id 天然新态）：计数与熔断态一并清零，校准恢复。</summary>
+    public void Reset()
+    {
+        _streak = 0;
+        _tripped = false;
+    }
+}
