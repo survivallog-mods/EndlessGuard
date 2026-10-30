@@ -39,8 +39,8 @@ namespace SurvivalLog.EndlessGuard;
 ///   （存档→读档）升级过的设备若游戏按配置重置了面板值，基线=重置后的原厂值，重放 ApplyLevel 幂等收敛；
 ///   MaxDurability 若已含上会话成长则基线偏高（账本只存 {xp,lv} 无基线，spec §6 认可此简化）。
 /// - cellKey=TransformComponent.Position 四舍五入 "x,z"；不可达退化 ownerId 字符串（裁决：Task 4 复核）。
-/// - 材质 emissive 脉冲：Battle.Logic 层拿不到 Renderer 直连，按裁决只记录脉冲起点列表 + RenderPulse() 桩，
-///   逐帧 ticker 归 Task 8。
+/// - 材质 emissive 脉冲：Battle.Logic 层拿不到 Renderer 直连，按裁决只记录脉冲起点列表 + RenderPulse()
+///   排水（T8 实装：转投 ArrowTowerFx 逐帧消费，降级表现=Head 缩放脉冲）。
 /// - XP 倍率常量字段（XpMultiplier/SandbagXpRate/KillBonusRatio/XpThresholdScale）Task 9 接 cfg。
 /// </summary>
 internal static class DeviceXpRuntime
@@ -164,6 +164,7 @@ internal static class DeviceXpRuntime
                 try
                 {
                     var cfgId = f.AgentConfigId;
+                    if (cfgId == ArrowTower.Id) ArrowTowerFx.NoteTower(f.InstanceId);   // T8：箭塔 FX 注册表喂养（复用本轮 2s 枚举，免 FX 逐帧 GetAllAgent）
                     var cellKey = CellKeyOf(f);
                     if (!Store.TryGet(SlotKey, cfgId, cellKey, out var e) || e == null || e.Lv <= 1) continue;
                     var lv = e.Lv;
@@ -368,10 +369,24 @@ internal static class DeviceXpRuntime
         catch (Exception e) { EndlessGuardPlugin.Trace("[XP] RecordPulse: " + e.Message); }   // 全文约定：不静默吞（评审 F6）
     }
 
-    /// <summary>逐帧 emissive 脉冲渲染（0.6s）。T8 实现——本任务空桩（裁决：不在此建 ticker）。</summary>
+    /// <summary>逐帧脉冲排水（T8 实装；ArrowTowerFx.Update 每帧调用）：队列转投 FX 层
+    /// （elapsed 补偿排水延迟，≥PulsePeriod 丢弃），逐帧衰减与降级表现（Head 缩放脉冲，材质 emissive
+    /// 不可靠的裁决见 ArrowTowerFx 类头⑥）全在 FX 侧；本层仍无 Renderer 直连，只清账。</summary>
     public static void RenderPulse()
     {
-        // T8 实现
+        try
+        {
+            if (PulseOwners.Count == 0) return;
+            var now = DateTime.UtcNow;
+            for (int i = 0; i < PulseOwners.Count; i++)
+            {
+                var elapsed = (float)(now - PulseStarts[i]).TotalSeconds;
+                if (elapsed < ArrowTowerFxMath.PulsePeriod) ArrowTowerFx.NotePulse(PulseOwners[i], elapsed);
+            }
+            PulseOwners.Clear();
+            PulseStarts.Clear();
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[XP] renderPulse: " + e.Message); }
     }
 
     // =====================================================================

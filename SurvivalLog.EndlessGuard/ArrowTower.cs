@@ -70,10 +70,12 @@ internal static class ArrowTower
         if (!rowsMissing && !lv4Missing)
         {
             ArrowTowerModel.EnsureRegistered();   // 表齐后的稳态轮挂模型注册（幂等，建一次+核验补丁；T7）
+            ArrowTowerFx.EnsureStarted();         // 表稳态懒建动画/弹道 ticker（门=ArrowTowerEnabled，裁决见 ArrowTowerFx 类头；T8）
             return;
         }
         Inject(td, fu, it, pl, dl);
         ArrowTowerModel.EnsureRegistered();       // 注入完成轮同样尝试（幂等；模板尚未建成功时提前一轮）
+        ArrowTowerFx.EnsureStarted();
     }
 
     /// <summary>注入/修复四行 + Lv4 登记。行级幂等：行已存在则跳过建行仅无条件拍平显示/数值字段

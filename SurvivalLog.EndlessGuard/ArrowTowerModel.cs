@@ -59,13 +59,13 @@ internal static class ArrowTowerModel
     private static readonly Color WoodDark = new Color32(0x7d, 0x5a, 0x3f, 0xff);
     private static readonly Color WoodMid = new Color32(0x96, 0x71, 0x4c, 0xff);
     private static readonly Color WoodLight = new Color32(0xb0, 0x8a, 0x5e, 0xff);
-    private static readonly Color IronLight = new Color32(0x5b, 0x61, 0x67, 0xff);
+    internal static readonly Color IronLight = new Color32(0x5b, 0x61, 0x67, 0xff);   // internal=T8 箭矢模板复用色板
     private static readonly Color IronDark = new Color32(0x3d, 0x42, 0x47, 0xff);
     private static readonly Color TileRed = new Color32(0x9b, 0x5a, 0x4a, 0xff);
     private static readonly Color Eave = new Color32(0x7c, 0x4a, 0x3e, 0xff);
     private static readonly Color FlagRed = new Color32(0xa3, 0x5b, 0x4e, 0xff);
-    private static readonly Color FletchCream = new Color32(0xdd, 0xd5, 0xc4, 0xff);
-    private static readonly Color ArrowShaft = new Color32(0xc9, 0xb4, 0x8a, 0xff);
+    internal static readonly Color FletchCream = new Color32(0xdd, 0xd5, 0xc4, 0xff);   // internal=T8 箭矢模板复用色板
+    internal static readonly Color ArrowShaft = new Color32(0xc9, 0xb4, 0x8a, 0xff);    // 同上
 
     internal static GameObject Template;                 // 隐藏模板（DontDestroyOnLoad+失活），只 Clone 不直发
     private static Material _baseMat;                    // 三级降级链产物（见 MakeBaseMaterial）
@@ -340,8 +340,8 @@ internal static class ArrowTowerModel
         return n;
     }
 
-    /// <summary>Cube 图元（去 Collider，localScale=尺寸，贴共享色材质）。</summary>
-    private static GameObject Box(Vector3 size, Vector3 pos, Color color, Transform parent, Vector3? euler = null)
+    /// <summary>Cube 图元（去 Collider，localScale=尺寸，贴共享色材质）。internal=T8 箭矢模板复用。</summary>
+    internal static GameObject Box(Vector3 size, Vector3 pos, Color color, Transform parent, Vector3? euler = null)
     {
         var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
         Object.DestroyImmediate(go.GetComponent<Collider>());
@@ -368,9 +368,10 @@ internal static class ArrowTowerModel
     }
 
     /// <summary>4 棱锥手写网格（5 顶点/基座方角在对角线；面片双面各发一套顶点防绕向误判——
-    /// 顶点极少量翻倍，免除 Unity 顺/逆时针绕向规则的歧义风险）。用于塔顶与箭头锥。
-    /// 轴向：锥沿 +y（euler 转位）；箭头处传 E(0,0,-90) 使 +y → +x。</summary>
-    private static void Pyramid(float radius, float height, Vector3 pos, Color color, Transform parent,
+    /// 顶点极少量翻倍，免除 Unity 顺/逆时针绕向规则的歧义风险）。用于塔顶与箭头锥（T8 箭矢模板
+    /// 经 internal 复用，免重复手写网格）。轴向：锥沿 +y（euler 转位）；箭头处传 E(0,0,-90) 使 +y → +x
+    ///（塔载上膛箭）/ E(90,0,0) 使 +y → +z（T8 飞行箭沿 +z 朝前）。</summary>
+    internal static void Pyramid(float radius, float height, Vector3 pos, Color color, Transform parent,
         Vector3 euler)
     {
         var s = radius * 0.70710678f;                    // r=对角半径 → 方底半边

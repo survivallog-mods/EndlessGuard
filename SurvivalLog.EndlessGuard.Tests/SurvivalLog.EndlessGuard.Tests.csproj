@@ -13,6 +13,7 @@
   <ItemGroup>
     <Compile Include="../SurvivalLog.EndlessGuard/DeviceXpMath.cs" />
     <Compile Include="../SurvivalLog.EndlessGuard/DeviceXpStore.cs" />
+    <Compile Include="../SurvivalLog.EndlessGuard/ArrowTowerFxMath.cs" />
   </ItemGroup>
 
   <ItemGroup>
