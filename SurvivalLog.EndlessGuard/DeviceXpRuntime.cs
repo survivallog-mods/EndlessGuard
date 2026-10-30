@@ -233,7 +233,7 @@ internal static class DeviceXpRuntime
             PulseOwners.Add(ownerId);
             PulseStarts.Add(now);
         }
-        catch { }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[XP] RecordPulse: " + e.Message); }   // 全文约定：不静默吞（评审 F6）
     }
 
     /// <summary>逐帧 emissive 脉冲渲染（0.6s）。T8 实现——本任务空桩（裁决：不在此建 ticker）。</summary>
@@ -387,6 +387,15 @@ internal static class DeviceXpRuntime
         private static List<int> _hpBefore;
         private static int _count;
 
+        // 一次性告警（ScavengePlans._lastRegErr 同款：同文只打首条防刷屏，换文重发）
+        private static string _lastListWarn;
+        private static void WarnOnce(string line)
+        {
+            if (line == _lastListWarn) return;
+            _lastListWarn = line;
+            EndlessGuardPlugin.Trace(line);
+        }
+
         // 签名钉死（mdump 实测：第三参=Il2CppSystem.Collections.Generic.IReadOnlyList`1<Int64>）
         private static MethodBase TargetMethod() =>
             AccessTools.Method(typeof(TowerCombatManager), "FireDevice",
@@ -402,19 +411,33 @@ internal static class DeviceXpRuntime
             _ids = null; _hpBefore = null; _count = 0;
             try
             {
-                // interop 的 IReadOnlyList`1 只有 get_Item 没有 Count；实参运行时是 List<long>（TickDevices 传 List），
-                // TryCast 后走 Count+索引（interop 摩擦预期内，失败=本帧不记账不炸）
-                var list = aliveIds?.TryCast<Il2CppSystem.Collections.Generic.List<long>>();
-                if (list == null) return;
-                _count = list.Count;
-                _ids = new List<long>(_count);
-                _hpBefore = new List<int>(_count);
-                for (int i = 0; i < list.Count; i++)
+                if (aliveIds == null) return;
+                // 首选 List<long> 强转（Count+索引齐备=全功能：HP 快照+击杀判定；TickDevices 实传 List）
+                var list = aliveIds.TryCast<Il2CppSystem.Collections.Generic.List<long>>();
+                if (list != null)
                 {
-                    var id = list[i];
-                    _ids.Add(id);
-                    _hpBefore.Add(TargetHp(id));
+                    _count = list.Count;
+                    _ids = new List<long>(_count);
+                    _hpBefore = new List<int>(_count);
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        var id = list[i];
+                        _ids.Add(id);
+                        _hpBefore.Add(TargetHp(id));
+                    }
+                    return;
                 }
+                // 兜底 IReadOnlyCollection<long>（interop 代理的 Count 挂该接口）：保住 AwardForFire 按 count 计，
+                // 放弃本帧 HP 快照/击杀判定（_hpBefore=null，后缀自然跳过击杀环）
+                var coll = aliveIds.TryCast<Il2CppSystem.Collections.Generic.IReadOnlyCollection<long>>();
+                if (coll != null)
+                {
+                    _count = coll.Count;
+                    WarnOnce("[XP] FireDevice 列表类型异常（降级只计数）: " + aliveIds.GetType().Name);
+                    return;
+                }
+                // 两个强转都失败：本帧不记账，但必须留痕（消除武器经验静默归零路径，评审 F1）
+                WarnOnce("[XP] FireDevice 列表类型不可解析（本帧不记账）: " + aliveIds.GetType().Name);
             }
             catch (Exception e) { EndlessGuardPlugin.Trace("[XP] FireDevice prefix: " + e.Message); }
         }
@@ -439,7 +462,9 @@ internal static class DeviceXpRuntime
                     int kills = 0;
                     for (int i = 0; i < ids.Count && i < hpBefore.Count; i++)
                     {
-                        if (hpBefore[i] > 0 && TargetHp(ids[i]) <= 0) kills++;   // 快照存活、现在躺平=本次击杀
+                        // -1=解析失败哨兵，不视作已死（防幻影击杀经验，评审 F2）：两次读数均有效且确死才计
+                        var hpAfter = TargetHp(ids[i]);
+                        if (hpBefore[i] > 0 && hpAfter >= 0 && hpAfter <= 0) kills++;
                     }
                     if (kills > 0) xp += DeviceXpMath.AwardForKill(atk, KillBonusRatio) * kills;
                 }
