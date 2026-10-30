@@ -241,6 +241,26 @@ internal static class DeviceXpRuntime
     /// <summary>总开关门（FallRestorer 同款语义：Enabled 未初始化=放行，显式 false=全部还原官方）。</summary>
     private static bool GateOn() => EndlessGuardPlugin.Enabled == null || EndlessGuardPlugin.Enabled.Value;
 
+    /// <summary>只读等级查询（Task 5 悬停展示消费；纯读侧，零写路径）：tracked 设备 → 账本条目
+    /// lv/xp + 下一累计阈值（-1=满级）。未追踪/无账目/不可达=false（悬停保持官方原名）。复用
+    /// Store/CellKeyOf/RefreshSlotKey/Thresholds 同一套口径（与 trace 行 xp=total/next 一致）；
+    /// 异常只 trace 不上抛（低频 UI 路径宁缺毋炸）。</summary>
+    internal static bool TryGetLevelInfo(Furniture f, out int lv, out int xp, out int next)
+    {
+        lv = 1; xp = 0; next = -1;
+        try
+        {
+            if (f == null || !DeviceXpMath.IsTrackedDevice(f.AgentConfigId)) return false;
+            RefreshSlotKey();
+            if (!Store.TryGet(SlotKey, f.AgentConfigId, CellKeyOf(f), out var e) || e == null) return false;
+            lv = Math.Max(1, e.Lv);
+            xp = e.Xp;
+            next = DeviceXpMath.NextThreshold(lv, Thresholds());
+            return true;
+        }
+        catch (Exception ex) { EndlessGuardPlugin.Trace("[XP] levelInfo: " + ex.Message); return false; }
+    }
+
     // =====================================================================
     // 入账与升级生效
     // =====================================================================
