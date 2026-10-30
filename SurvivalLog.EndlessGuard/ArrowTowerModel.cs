@@ -45,6 +45,9 @@ namespace SurvivalLog.EndlessGuard;
 /// ——等于干净销毁，无泄漏。
 /// T8 动画锚点：弩机整件为根下名为「Head」的直接子物体（旋转部，pivot 在平台中央）；旗子为
 /// 「Flag」直接子物体（pivot 在旗杆轴）——T8 只动这两个。
+/// 校验口径（C1 加固）：VerifyPatches 双重核验=①三重载 postfix 在挂（PatchInfo.Postfixes）②我方
+/// Postfix 的 __result 参数 IsByRef（ref 缺失=回写无效的静态防线）；运行时自证=首次 supply trace 带
+/// instanceID（postfix 内打印≠回写成功的终证是场景出现该实例而非兜底盒，作者试玩核对）。
 /// 注意：[HarmonyPatch] 只挂在下方三个嵌套补丁类上（EndlessGuardPlugin.Load 逐类自动装配按
 /// 该特性扫描）；本外层类不带，否则会触发"TargetMethod 未找到"的假告警。
 /// </summary>
@@ -81,9 +84,9 @@ internal static class ArrowTowerModel
             BuildTemplate();
             _built = true;
             var via = VerifyPatches()
-                ? "Harmony postfix LoadGameObject×3(miss→supply)"
-                : "POSTFIX 未在挂（interop 漂移？）——实机将显示官方兜底盒";
-            EndlessGuardPlugin.Trace("[Tower] model prefab built (parts=" + Template.transform.childCount
+                ? "Harmony postfix LoadGameObject×3(miss→supply, __result ref 已核验)"
+                : "POSTFIX 未在挂/回写核验失败（interop 漂移？）——实机将显示官方兜底盒";
+            EndlessGuardPlugin.Trace("[Tower] model prefab built (parts=" + CountDescendants(Template.transform)
                                      + ", via=" + via + ")");
         }
         catch (Exception e)
@@ -96,28 +99,40 @@ internal static class ArrowTowerModel
         }
     }
 
-    /// <summary>核验三个 LoadGameObject 重载的 postfix 都在挂（TargetMethod 找不到=签名漂移）。</summary>
+    /// <summary>核验三重载补丁闭环（C1 加固后口径，见类头「校验口径」）：①目标方法在、postfix 在挂；
+    /// ②我方 Postfix 的 __result 参数为 ref（IsByRef）——按值声明=只读副本，回写无效（成功假象防线）。</summary>
     private static bool VerifyPatches()
     {
         try
         {
             var t = typeof(GameCore.HotUpdate.Battle.BattleResource);
-            foreach (var sig in new Func<MethodBase>[]
-                     {
-                         () => AccessTools.Method(t, "LoadGameObject", new[] { typeof(string) }),
-                         () => AccessTools.Method(t, "LoadGameObject",
-                             new[] { typeof(string), typeof(GameObject), typeof(bool) }),
-                         () => AccessTools.Method(t, "LoadGameObject",
-                             new[]
-                             {
-                                 typeof(string), typeof(GameObject), typeof(Vector3),
-                                 typeof(Vector3), typeof(Vector3)
-                             })
-                     })
+            (Func<MethodBase>, Type)[] checks =
             {
-                var mi = sig();
+                (() => AccessTools.Method(t, "LoadGameObject", new[] { typeof(string) }),
+                    typeof(LoadGameObject_String)),
+                (() => AccessTools.Method(t, "LoadGameObject",
+                        new[] { typeof(string), typeof(GameObject), typeof(bool) }),
+                    typeof(LoadGameObject_Root_Bool)),
+                (() => AccessTools.Method(t, "LoadGameObject",
+                        new[]
+                        {
+                            typeof(string), typeof(GameObject), typeof(Vector3),
+                            typeof(Vector3), typeof(Vector3)
+                        }),
+                    typeof(LoadGameObject_Root_PosEulerScale))
+            };
+            foreach (var (finder, patchType) in checks)
+            {
+                var mi = finder();
                 var info = mi == null ? null : Harmony.GetPatchInfo(mi);
                 if (info == null || info.Postfixes.Count == 0) return false;
+                var pm = patchType.GetMethod("Postfix",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+                if (pm == null) return false;
+                var byRef = false;
+                foreach (var p in pm.GetParameters())
+                    if (p.Name == "__result" && p.ParameterType.IsByRef) { byRef = true; break; }
+                if (!byRef) return false;
             }
             return true;
         }
@@ -133,7 +148,7 @@ internal static class ArrowTowerModel
             AccessTools.Method(typeof(GameCore.HotUpdate.Battle.BattleResource), "LoadGameObject",
                 new[] { typeof(string) });
 
-        private static void Postfix(string __0, GameObject __result) =>
+        private static void Postfix(string __0, ref GameObject __result) =>
             __result = Supply(path: __0, fallback: __result, root: null, worldStays: false,
                 localPos: null, localEuler: null, localScale: null);
     }
@@ -145,7 +160,7 @@ internal static class ArrowTowerModel
             AccessTools.Method(typeof(GameCore.HotUpdate.Battle.BattleResource), "LoadGameObject",
                 new[] { typeof(string), typeof(GameObject), typeof(bool) });
 
-        private static void Postfix(string __0, GameObject __1, bool __2, GameObject __result) =>
+        private static void Postfix(string __0, GameObject __1, bool __2, ref GameObject __result) =>
             __result = Supply(path: __0, fallback: __result, root: __1, worldStays: __2,
                 localPos: null, localEuler: null, localScale: null);
     }
@@ -162,7 +177,7 @@ internal static class ArrowTowerModel
                 });
 
         private static void Postfix(string __0, GameObject __1, Vector3 __2, Vector3 __3, Vector3 __4,
-            GameObject __result) =>
+            ref GameObject __result) =>
             __result = Supply(path: __0, fallback: __result, root: __1, worldStays: false,
                 localPos: __2, localEuler: __3, localScale: __4);
     }
@@ -172,6 +187,7 @@ internal static class ArrowTowerModel
     private static GameObject Supply(string path, GameObject fallback, GameObject root, bool worldStays,
         Vector3? localPos, Vector3? localEuler, Vector3? localScale)
     {
+        GameObject inst = null;
         try
         {
             if (fallback != null || path == null ||
@@ -183,7 +199,7 @@ internal static class ArrowTowerModel
             if (Template == null) return fallback;
 
             var instObj = Object.Instantiate(Template);
-            var inst = instObj == null ? null : instObj.TryCast<GameObject>();
+            inst = instObj == null ? null : instObj.TryCast<GameObject>();
             if (inst == null) return fallback;
             inst.SetActive(true);                                            // 镜像官方命中路径（SetActive(true)）
             if (root != null)
@@ -196,12 +212,16 @@ internal static class ArrowTowerModel
             if (!_suppliedTraced)
             {
                 _suppliedTraced = true;
-                EndlessGuardPlugin.Trace("[Tower] model supplied on first miss: " + path);
+                // 运行时自证（C1 口径）：本行在 postfix 内打印≠回写成功；ref 回写由 VerifyPatches 静态核验，
+                // 实机终证=trace 的 instanceID 对应物出现在场景（而非官方兜底盒）。
+                EndlessGuardPlugin.Trace("[Tower] model supplied on first miss: " + path
+                                         + " instanceID=" + inst.GetInstanceID());
             }
             return inst;
         }
         catch (Exception e)
         {
+            if (inst != null) Object.Destroy(inst);   // M4：半途异常不留激活孤儿克隆
             EndlessGuardPlugin.Trace("[Tower] supply: " + e.Message);
             return fallback;
         }
@@ -263,12 +283,13 @@ internal static class ArrowTowerModel
         foreach (var (x, z) in new[] { (-0.49f, -0.49f), (0.49f, -0.49f), (-0.49f, 0.49f), (0.49f, 0.49f) })
             Ball(0.10f, P(x, 1.45f, z), WoodLight, t);                                    // 檐角圆球×4
 
-        // ── 四坡顶 y1.5-1.91（檐口 + 四短柱 + 4 棱锥手写网格）──
+        // ── 四坡顶 y1.5-1.91（檐口 + 四短柱 + 4 棱锥手写网格 + 顶饰球）──
         foreach (var (x, z) in new[] { (-0.30f, -0.30f), (0.30f, -0.30f), (-0.30f, 0.30f), (0.30f, 0.30f) })
             Box(new Vector3(0.05f, 0.07f, 0.05f), P(x, 1.475f, z), WoodDark, t);          // 四短柱
         Box(new Vector3(0.92f, 0.05f, 0.92f), P(0, 1.52f, 0), Eave, t);                   // 檐口
         Pyramid(0.66f, 0.36f, P(0, 1.55f, 0), TileRed, t, E(0, 0, 0));
         // （手写网格基座方角天然落在对角线上=四坡面正对四墙，等价「Cone(4) 转45°」的意图，不再额外转）
+        Ball(0.07f, P(0, 1.945f, 0), IronDark, t);                                        // 顶饰球（评审口径 0.035 取半径）
 
         // ── 旗杆 + 红燕尾旗（角柱外 0.52,·,0.52；Flag 子物体 T8 摆动）──
         Box(new Vector3(0.025f, 0.80f, 0.025f), P(0.52f, 1.59f, 0.52f), WoodDark, t);
@@ -306,6 +327,18 @@ internal static class ArrowTowerModel
 
     private static Vector3 P(float x, float y, float z) => new(x, y, z);
     private static Vector3 E(float x, float y, float z) => new(x, y, z);
+
+    /// <summary>全后代结构件数（M1：root.childCount 不含 Head 内 21 件，报告/trace 口径统一用全后代）。</summary>
+    private static int CountDescendants(Transform t)
+    {
+        var n = 0;
+        for (var i = 0; i < t.childCount; i++)
+        {
+            n++;
+            n += CountDescendants(t.GetChild(i));
+        }
+        return n;
+    }
 
     /// <summary>Cube 图元（去 Collider，localScale=尺寸，贴共享色材质）。</summary>
     private static GameObject Box(Vector3 size, Vector3 pos, Color color, Transform parent, Vector3? euler = null)
@@ -379,6 +412,7 @@ internal static class ArrowTowerModel
     {
         var go = GameObject.CreatePrimitive(PrimitiveType.Cube);   // 借图元拿现成 MeshFilter/MeshRenderer
         Object.DestroyImmediate(go.GetComponent<Collider>());
+        go.name = "Flag";                                  // T8 摆动锚点名（CreatePrimitive 默认名是 "Cube"）
         var tr = go.transform;
         tr.SetParent(parent, false);
         tr.localPosition = pos;
