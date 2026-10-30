@@ -28,25 +28,32 @@ internal static class DeviceXpMath
         return Math.Min(lv, maxLevel);
     }
 
-    /// <summary>升到 level+1 级所需累计经验；已满级（≥thresholds.Length+1）返回 -1（MAX）。</summary>
-    internal static int NextThreshold(int level, int[] thresholds) =>
-        level >= thresholds.Length + 1 ? -1 : thresholds[level - 1];
+    /// <summary>升到 level+1 级所需累计经验；已满级（≥有效上限，maxLevel&gt;0 时= maxLevel，否则 thresholds.Length+1）
+    /// 返回 -1（MAX）。Task 9：maxLevel 供 cfg Defense.MaxLevel 传参（降上限时提前显示 MAX）。</summary>
+    internal static int NextThreshold(int level, int[] thresholds, int maxLevel = 0)
+    {
+        var cap = maxLevel > 0 ? maxLevel : thresholds.Length + 1;
+        return level >= cap ? -1 : thresholds[level - 1];
+    }
 
-    /// <summary>目标攻击：面板 ×1.15^(lv-1) 复利，四舍五入（spec §3.3 武器成长）。</summary>
-    internal static int TargetAttack(int baseAtk, int level) =>
-        (int)Math.Round(baseAtk * Math.Pow(1.15, level - 1), MidpointRounding.AwayFromZero);
+    /// <summary>目标攻击：面板 ×(1+stepRatio)^(lv-1) 复利，四舍五入（spec §3.3 默认 0.15；Task 9 由 cfg
+    /// Defense.WeaponAtkStep 传参，可选参数默认值=spec §3.5 定值，下同）。</summary>
+    internal static int TargetAttack(int baseAtk, int level, float stepRatio = 0.15f) =>
+        (int)Math.Round(baseAtk * Math.Pow(1.0 + stepRatio, level - 1), MidpointRounding.AwayFromZero);
 
-    /// <summary>目标攻击间隔：面板 ×0.92^(lv-1)（间隔 −8%/级），下限 0.6×base（spec §3.3 钳制，攻速不封顶缩）。</summary>
-    internal static float TargetInterval(float baseInt, int level) =>
-        Math.Max(baseInt * (float)Math.Pow(0.92, level - 1), baseInt * 0.6f);
+    /// <summary>目标攻击间隔：面板 ×(1-stepRatio)^(lv-1)（默认 −8%/级），下限 0.6×base（spec §3.3 钳制，
+    /// 攻速不封顶缩；钳制值不入 cfg）。</summary>
+    internal static float TargetInterval(float baseInt, int level, float stepRatio = 0.08f) =>
+        Math.Max(baseInt * (float)Math.Pow(1.0 - stepRatio, level - 1), baseInt * 0.6f);
 
     /// <summary>目标耐久：base + (lv-1)×stepAbs（stepAbs 由调用方按 StepAbs 预先算好传入）。</summary>
     internal static int TargetMaxHp(int baseHp, int level, int stepAbs) =>
         baseHp + (level - 1) * stepAbs;
 
-    /// <summary>目标射程：base + (lv-1)×0.55 格（箭塔专属成长，spec §4.1 端点 3.0→5.2）。</summary>
-    internal static float TargetRange(float baseRange, int level) =>
-        baseRange + (level - 1) * 0.55f;
+    /// <summary>目标射程：base + (lv-1)×step 格（箭塔专属成长；默认 0.55，spec §4.1 端点 3.0→5.2；
+    /// Task 9 由 cfg Defense.TowerRangeStep 传参）。</summary>
+    internal static float TargetRange(float baseRange, int level, float step = 0.55f) =>
+        baseRange + (level - 1) * step;
 
     /// <summary>受击伤害系数：perLevelFactor^(lv-1)（武器 0.9/级；箭塔传 1f=无减伤成长；Lv1 恒 1）。</summary>
     internal static float IncomingDamageFactor(int level, float perLevelFactor) =>
@@ -81,26 +88,26 @@ internal static class DeviceXpMath
     /// 1e-4 远小于任何一格成长步长（最小射程步 0.55 格），不会把真实成长误判为无漂移。</summary>
     private const float FloatEps = 1e-4f;
 
-    /// <summary>攻击面板漂移：live ≠ TargetAttack(base, lv)（int 直比）。</summary>
-    internal static bool AttackDrifts(int baseAtk, int lv, int liveAtk) =>
-        liveAtk != TargetAttack(baseAtk, lv);
+    /// <summary>攻击面板漂移：live ≠ TargetAttack(base, lv)（int 直比；步长参数须与 ApplyLevel 同源）。</summary>
+    internal static bool AttackDrifts(int baseAtk, int lv, int liveAtk, float stepRatio = 0.15f) =>
+        liveAtk != TargetAttack(baseAtk, lv, stepRatio);
 
     /// <summary>攻击间隔漂移：|live − TargetInterval(base, lv)| > 容差。</summary>
-    internal static bool IntervalDrifts(float baseInt, int lv, float liveInt) =>
-        Math.Abs(liveInt - TargetInterval(baseInt, lv)) > FloatEps;
+    internal static bool IntervalDrifts(float baseInt, int lv, float liveInt, float stepRatio = 0.08f) =>
+        Math.Abs(liveInt - TargetInterval(baseInt, lv, stepRatio)) > FloatEps;
 
     /// <summary>目标射程平方（RangeSqr 口径，spec §4.1）：对 base 开方取 TargetRange 再平方。
     /// ApplyLevel 写回与巡检漂移判定共用此一处的开方/平方换算（杜绝两套算式各自漂移）。</summary>
-    internal static float TargetRangeSqr(float baseRangeSqr, int lv)
+    internal static float TargetRangeSqr(float baseRangeSqr, int lv, float step = 0.55f)
     {
         var baseRange = (float)Math.Sqrt(Math.Max(0f, baseRangeSqr));
-        var r = TargetRange(baseRange, lv);
+        var r = TargetRange(baseRange, lv, step);
         return r * r;
     }
 
     /// <summary>箭塔射程漂移（RangeSqr 口径）：|live − TargetRangeSqr(base, lv)| > 容差。</summary>
-    internal static bool RangeDrifts(float baseRangeSqr, int lv, float liveRangeSqr) =>
-        Math.Abs(liveRangeSqr - TargetRangeSqr(baseRangeSqr, lv)) > FloatEps;
+    internal static bool RangeDrifts(float baseRangeSqr, int lv, float liveRangeSqr, float step = 0.55f) =>
+        Math.Abs(liveRangeSqr - TargetRangeSqr(baseRangeSqr, lv, step)) > FloatEps;
 
     /// <summary>最大耐久漂移：只判 live &lt; TargetMaxHp 方向——ApplyLevel 只加不减，live&gt;target 时
     /// 无法收敛，判了只会每 2s 永久 trace 刷屏（读档已含上会话成长且基线偏高属 spec §6 认可的已知让步）。</summary>

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using BepInEx;
+using BepInEx.Configuration;
 using HarmonyLib;
 using GameCore.HotUpdate.Battle.Logic;
 using UnityEngine;
@@ -41,15 +42,34 @@ namespace SurvivalLog.EndlessGuard;
 /// - cellKey=TransformComponent.Position 四舍五入 "x,z"；不可达退化 ownerId 字符串（裁决：Task 4 复核）。
 /// - 材质 emissive 脉冲：Battle.Logic 层拿不到 Renderer 直连，按裁决只记录脉冲起点列表 + RenderPulse()
 ///   排水（T8 实装：转投 ArrowTowerFx 逐帧消费，降级表现=Head 缩放脉冲）。
-/// - XP 倍率常量字段（XpMultiplier/SandbagXpRate/KillBonusRatio/XpThresholdScale）Task 9 接 cfg。
+/// - XP 数值旋钮（Task 9 实装）：XpMultiplier/SandbagXpRate/KillBonusRatio/XpThresholdScale + 各类成长
+///   步长/系数全部读 cfg Defense.*（spec §3.5；属性直取 ConfigEntry.Value，改值即刻生效、巡检 2s 对账
+///   自动重算已升级设备）；Defense.XPEnabled=false=XpOn() 门整体停用（入账/对账/悬停全停，塔 FX 照走）。
 /// </summary>
 internal static class DeviceXpRuntime
 {
-    // ===== XP 倍率/系数（裁决定名；Task 9 改由 cfg 驱动，先常量占位）=====
-    public static float XpMultiplier = 1f;      // 开火经验倍率
-    public static float SandbagXpRate = 2f;     // 沙包(36001)承伤经验倍率（spec §3.1 作者决议）
-    public static float KillBonusRatio = 0.5f;  // 击杀追加比例（spec §3.1）
-    public static float XpThresholdScale = 1f;  // 阈值整体缩放（1=默认 1200/3600/8400/16800）
+    // ===== XP 数值旋钮（spec §3.5 全表接 cfg，Task 9）：读侧直取 ConfigEntry.Value——cfg 改值即刻生效，
+    // 步长/系数类经 OnStep 巡检对账 2 秒内把已升级设备重算到新目标；cfg 未绑定（异常兜底）回退 spec 默认值。
+    // 属性名与 spec §3.5 键名一一对应，语义注释同 cfg 描述（EndlessGuardPlugin.Load）=====
+    public static float XpMultiplier => Cfg(EndlessGuardPlugin.XPMultiplier, 1f);       // 开火经验倍率
+    public static float SandbagXpRate => Cfg(EndlessGuardPlugin.SandbagXPRate, 2f);     // 沙包(36001)承伤经验倍率（spec §3.1 作者决议）
+    public static float KillBonusRatio => Cfg(EndlessGuardPlugin.KillBonusRatio, 0.5f); // 击杀追加比例（spec §3.1）
+    public static float XpThresholdScale => Cfg(EndlessGuardPlugin.XPThresholdScale, 1f); // 阈值整体缩放（1=默认 1200/3600/8400/16800）
+    public static float WeaponAtkStep => Cfg(EndlessGuardPlugin.WeaponAtkStep, 0.15f);        // 武器类每级攻击 +比例（复利）
+    public static float WeaponIntervalStep => Cfg(EndlessGuardPlugin.WeaponIntervalStep, 0.08f); // 武器类每级间隔 −比例
+    public static float WeaponHpStepRatio => Cfg(EndlessGuardPlugin.WeaponHpStepRatio, 0.30f);   // 武器类每级耐久 +比例
+    public static float WeaponDefFactor => Cfg(EndlessGuardPlugin.WeaponDefFactor, 0.90f);       // 武器类每级受伤×系数
+    public static float SandbagHpStepRatio => Cfg(EndlessGuardPlugin.SandbagHpStepRatio, 0.25f); // 沙包每级耐久 +比例
+    public static float SandbagDefFactor => Cfg(EndlessGuardPlugin.SandbagDefFactor, 0.88f);     // 沙包每级受伤×系数
+    public static float TowerRangeStep => Cfg(EndlessGuardPlugin.TowerRangeStep, 0.55f);         // 箭塔射程每级 +格数
+
+    /// <summary>等级上限（cfg Defense.MaxLevel 夹在 [1, 阈值表长度+1=5]；1=关闭成长）。只封顶今后的升级
+    /// ——已超上限设备属性保留不回退（只升不降裁决，账本等级在，调回上限成长自动续上）。</summary>
+    public static int MaxLevel => Math.Min(
+        Math.Max(EndlessGuardPlugin.MaxLevel != null ? EndlessGuardPlugin.MaxLevel.Value : 5, 1),
+        DeviceXpMath.ThresholdsDefault.Length + 1);
+
+    private static float Cfg(ConfigEntry<float> e, float dflt) => e != null ? e.Value : dflt;
 
     /// <summary>账本脏标记：Award 写入即置位；Task 4 巡检 ticker 消费（flush 后清零）。本任务不落盘。</summary>
     internal static bool _dirty;
@@ -61,12 +81,14 @@ internal static class DeviceXpRuntime
     /// 托管侧纯 C# 静态事件（il2cpp event interop 有坑，mod 内部自产自消，Task 8 消费）。</summary>
     public static event Action<long, Vector3, long> DeviceFired;
 
-    // ===== 配置按家具 id 派发（spec §3.3/§4.1：武器 36002/36003/36004/99005 攻防成长，沙包 36001 只长血）=====
+    // ===== 配置按家具 id 派发（spec §3.3/§4.1：武器 36002/36003/36004/99005 攻防成长，沙包 36001 只长血；
+    // 步长/系数 Task 9 接 cfg——箭塔 HP 步长与减伤系数不入 cfg（§3.5 未列），保持 spec §4.1 裁定值）=====
     private static bool IsWeaponClass(int cfgId) => cfgId == 36002 || cfgId == 36003 || cfgId == 36004 || cfgId == 99005;
     private static float IncomingFactorFor(int cfgId) =>
-        cfgId == 36001 ? 0.88f : cfgId == 99005 ? 1.0f : 0.9f;   // 箭塔 1.0=无减伤成长（裁决）
+        cfgId == 36001 ? SandbagDefFactor : cfgId == 99005 ? 1.0f : WeaponDefFactor;   // 箭塔 1.0=无减伤成长（裁决）
     private static float HpStepRatioFor(int cfgId) =>
-        cfgId == 36001 ? 0.25f : cfgId == 99005 ? 0.15f : 0.30f;
+        cfgId == 36001 ? SandbagHpStepRatio : cfgId == 99005 ? TowerHpStepRatio : WeaponHpStepRatio;
+    private const float TowerHpStepRatio = 0.15f;   // 箭塔耐久步长（spec §4.1 低成长脆皮定位；低血是平衡项，不放 cfg）
     private const int SandbagCfgId = 36001;
     private const int ArrowTowerCfgId = 99005;
     private const int SpikeCfgId = 36002;   // 尖刺障碍：咬击反伤记账目标（spec §3.4）
@@ -103,7 +125,7 @@ internal static class DeviceXpRuntime
         }
     }
 
-    /// <summary>阈值表（XpThresholdScale 缩放后；Task 9 把 cfg 接进字段即可生效）。lv 封顶=长度+1。</summary>
+    /// <summary>阈值表（XpThresholdScale cfg 缩放后）。lv 封顶=MaxLevel（cfg，默认=长度+1）。</summary>
     private static int[] Thresholds() =>
         Array.ConvertAll(DeviceXpMath.ThresholdsDefault,
             t => (int)Math.Round(t * XpThresholdScale, MidpointRounding.AwayFromZero));
@@ -141,6 +163,18 @@ internal static class DeviceXpRuntime
         try
         {
             if (!GateOn()) return;
+            if (!XpOn())
+            {
+                // Defense.XPEnabled=false：XP 侧（脏账落盘/对账重放）全停（账本冻结不改写）；
+                // 但箭塔 FX 注册表喂养照走——FX 属塔本体（门=Defense.ArrowTowerEnabled，T8 裁决），
+                // DeviceFired 开火路径同样在喂养，此处只补「从未开过火的塔」的待机动画入口。
+                foreach (var f in DevicesInPlay())
+                {
+                    try { if (f.AgentConfigId == ArrowTower.Id) ArrowTowerFx.NoteTower(f.InstanceId); }
+                    catch { /* 单台病态不拖垮整轮 */ }
+                }
+                return;
+            }
 
             // ① slot 上下文失效检测（读档/换档）
             RefreshSlotKey();
@@ -175,9 +209,9 @@ internal static class DeviceXpRuntime
                     if (b == null) continue;
                     var drifted =
                         (IsWeaponClass(cfgId) && tower != null && (
-                            DeviceXpMath.AttackDrifts(b.Attack, lv, tower.Attack) ||
-                            DeviceXpMath.IntervalDrifts(b.Interval, lv, tower.AttackIntervalSeconds) ||
-                            (cfgId == ArrowTowerCfgId && DeviceXpMath.RangeDrifts(b.RangeSqr, lv, tower.AttackRangeSqr)))) ||
+                            DeviceXpMath.AttackDrifts(b.Attack, lv, tower.Attack, WeaponAtkStep) ||
+                            DeviceXpMath.IntervalDrifts(b.Interval, lv, tower.AttackIntervalSeconds, WeaponIntervalStep) ||
+                            (cfgId == ArrowTowerCfgId && DeviceXpMath.RangeDrifts(b.RangeSqr, lv, tower.AttackRangeSqr, TowerRangeStep)))) ||
                         (dura != null && b.MaxHp > 0 &&
                             DeviceXpMath.MaxHpDrifts(b.MaxHp, DeviceXpMath.StepAbs(b.MaxHp, HpStepRatioFor(cfgId)), lv, dura.MaxDurability));
                     var fuse = FuseOf(ownerId);
@@ -242,6 +276,10 @@ internal static class DeviceXpRuntime
     /// <summary>总开关门（FallRestorer 同款语义：Enabled 未初始化=放行，显式 false=全部还原官方）。</summary>
     private static bool GateOn() => EndlessGuardPlugin.Enabled == null || EndlessGuardPlugin.Enabled.Value;
 
+    /// <summary>XP 门（Task 9，GateOn 之上再挂 Defense.XPEnabled）：false=经验系统整体停用——入账/等级
+    /// 属性写回/巡检对账/悬停等级全部停；已生效属性改动本局保留，重启读档后还原官方原厂值（账本保留）。</summary>
+    internal static bool XpOn() => GateOn() && (EndlessGuardPlugin.XPEnabled == null || EndlessGuardPlugin.XPEnabled.Value);
+
     /// <summary>只读等级查询（Task 5 悬停展示消费；纯读侧，零写路径）：tracked 设备 → 账本条目
     /// lv/xp + 下一累计阈值（-1=满级）。未追踪/无账目/不可达=false（悬停保持官方原名）。复用
     /// Store/CellKeyOf/RefreshSlotKey/Thresholds 同一套口径（与 trace 行 xp=total/next 一致）；
@@ -256,7 +294,7 @@ internal static class DeviceXpRuntime
             if (!Store.TryGet(SlotKey, f.AgentConfigId, CellKeyOf(f), out var e) || e == null) return false;
             lv = Math.Max(1, e.Lv);
             xp = e.Xp;
-            next = DeviceXpMath.NextThreshold(lv, Thresholds());
+            next = lv >= MaxLevel ? -1 : DeviceXpMath.NextThreshold(lv, Thresholds());   // cfg 降上限时提前 MAX
             return true;
         }
         catch (Exception ex) { EndlessGuardPlugin.Trace("[XP] levelInfo: " + ex.Message); return false; }
@@ -273,7 +311,7 @@ internal static class DeviceXpRuntime
         try
         {
             if (furn == null || amount <= 0) return;
-            if (!GateOn()) return;
+            if (!XpOn()) return;
             var cfgId = furn.AgentConfigId;
             if (!DeviceXpMath.IsTrackedDevice(cfgId)) return;
             var cellKey = CellKeyOf(furn);
@@ -282,7 +320,7 @@ internal static class DeviceXpRuntime
             if (entry.Lv < 1) entry.Lv = 1;   // GetOrNew 新建条目默认 0 → 初始 Lv1（不触发 lvup 行）
             var newXp = entry.Xp + amount;
             var th = Thresholds();
-            var lv = DeviceXpMath.LevelFromXp(newXp, th.Length + 1, th);
+            var lv = DeviceXpMath.LevelFromXp(newXp, MaxLevel, th);   // cfg MaxLevel 封顶（默认 5=阈值表长度+1，同旧行为）
             if (lv > entry.Lv)   // 只升不降（阈值缩档不回退已生效属性）
             {
                 entry.Lv = lv;
@@ -318,11 +356,11 @@ internal static class DeviceXpRuntime
 
             if (IsWeaponClass(cfgId) && tower != null)
             {
-                tower.Attack = DeviceXpMath.TargetAttack(b.Attack, lv);
-                tower.AttackIntervalSeconds = DeviceXpMath.TargetInterval(b.Interval, lv);
+                tower.Attack = DeviceXpMath.TargetAttack(b.Attack, lv, WeaponAtkStep);
+                tower.AttackIntervalSeconds = DeviceXpMath.TargetInterval(b.Interval, lv, WeaponIntervalStep);
                 if (cfgId == ArrowTowerCfgId)
                 {
-                    tower.AttackRangeSqr = DeviceXpMath.TargetRangeSqr(b.RangeSqr, lv);   // brief：AttackRangeSqr(=TargetRange²)，与巡检判定同一换算
+                    tower.AttackRangeSqr = DeviceXpMath.TargetRangeSqr(b.RangeSqr, lv, TowerRangeStep);   // brief：AttackRangeSqr(=TargetRange²)，与巡检判定同一换算
                 }
             }
             if (dura != null && b.MaxHp > 0)
@@ -492,7 +530,7 @@ internal static class DeviceXpRuntime
             _ctx = null;
             try
             {
-                if (__instance == null || !GateOn()) return;
+                if (__instance == null || !XpOn()) return;   // XP 关=字节透传（不减伤也不入账，Task 9 门）
                 var furn = ResolveFurniture(__instance.ownerInstanceId);
                 if (furn == null) return;
                 var cfgId = furn.AgentConfigId;
@@ -602,6 +640,8 @@ internal static class DeviceXpRuntime
                 try { DeviceFired?.Invoke(furniture.InstanceId, MuzzleOf(furniture), targetId); }
                 catch (Exception e) { EndlessGuardPlugin.Trace("[XP] DeviceFired 消费者异常: " + e.Message); }
 
+                if (!XpOn()) return;   // XP 关=只发事件不记账（DeviceFired 已发，塔 FX 照常——FX 属塔本体，归 Defense.ArrowTowerEnabled 管）
+
                 var atk = device != null ? device.Attack : 0;
                 int xp = DeviceXpMath.AwardForFire(atk, count, XpMultiplier);
                 if (ids != null && hpBefore != null)
@@ -637,7 +677,7 @@ internal static class DeviceXpRuntime
         {
             try
             {
-                if (zombie == null || !GateOn()) return;
+                if (zombie == null || !XpOn()) return;   // XP 关=反伤不入账
                 var furn = ResolveFurniture(zombie.AssignedTargetId);
                 if (furn == null || furn.AgentConfigId != SpikeCfgId) return;
                 if (!DeviceXpMath.IsTrackedDevice(SpikeCfgId)) return;
@@ -665,7 +705,7 @@ internal static class DeviceXpRuntime
         {
             try
             {
-                if (furniture == null || !GateOn()) return;
+                if (furniture == null || !XpOn()) return;   // XP 关=残骸撞尸不入账
                 var tower = GetComponent<TowerDeviceComponent>(furniture);
                 var wreck = tower != null && tower.WreckDamage > 0 ? tower.WreckDamage : damage;
                 if (wreck <= 0) return;

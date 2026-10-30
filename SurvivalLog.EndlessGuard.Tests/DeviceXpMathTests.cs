@@ -247,4 +247,60 @@ public class DeviceXpMathTests
         fuse.Reset();                     // 槽切换/设备重建（换 id 天然新态）
         Assert.True(fuse.OnTrigger());    // 计数复位后恢复校准
     }
+
+    // ---- Task 9 cfg 接线：成长步长/等级上限参数化（可选参数默认值=spec §3.5 定值；cfg 换值同式复算，
+    //      ApplyLevel 与巡检漂移判定共用同一传参 → 必收敛）----
+
+    [Fact]
+    public void TargetAttack_CustomStep_Compounds()
+    {
+        // cfg WeaponAtkStep=0.20：10×1.2²=14.4→14（复利式与默认步长同款，只是比例换值）
+        Assert.Equal(14, DeviceXpMath.TargetAttack(10, 3, 0.20f));
+        Assert.Equal(10, DeviceXpMath.TargetAttack(10, 1, 0.20f));   // Lv1 恒=面板原值
+    }
+
+    [Fact]
+    public void TargetInterval_CustomStep_Clamped()
+    {
+        // cfg WeaponIntervalStep=0.10：2×0.9²=1.62
+        Assert.InRange(DeviceXpMath.TargetInterval(2f, 3, 0.10f), 1.61f, 1.63f);
+        // 0.6×base 钳制不随步长变化：步长加大也一样钳住
+        Assert.InRange(DeviceXpMath.TargetInterval(1f, 20, 0.20f), 0.599f, 0.601f);
+    }
+
+    [Fact]
+    public void TargetRange_CustomStep_Linear()
+    {
+        // cfg TowerRangeStep=0.70：3+4×0.7=5.8；RangeSqr 换算与漂移判定同源自洽
+        Assert.InRange(DeviceXpMath.TargetRange(3.0f, 5, 0.70f), 5.79f, 5.81f);
+        var sqr = DeviceXpMath.TargetRangeSqr(9f, 5, 0.70f);           // 5.8²=33.64
+        Assert.InRange(sqr, 33.63f, 33.65f);
+        Assert.False(DeviceXpMath.RangeDrifts(9f, 5, sqr, 0.70f));     // 写回=判定同参 → 无漂移
+        Assert.True(DeviceXpMath.RangeDrifts(9f, 5, 9f, 0.70f));       // 重置回原厂 → 漂移
+    }
+
+    [Fact]
+    public void AttackDrifts_CustomStep_UsesSameTarget()
+    {
+        // cfg WeaponAtkStep=0.20 时目标=10×1.2²→14：live=14 无漂移（默认步长的目标 13 反而漂移）
+        Assert.False(DeviceXpMath.AttackDrifts(10, 3, 14, 0.20f));
+        Assert.True(DeviceXpMath.AttackDrifts(10, 3, 13, 0.20f));
+    }
+
+    [Fact]
+    public void NextThreshold_MaxLevelCap_ShowsMaxEarly()
+    {
+        // cfg MaxLevel=3：lv3 即 MAX（-1），lv2 仍给下一阈值；默认 maxLevel=0 行为不变（老测试锁定）
+        Assert.Equal(-1, DeviceXpMath.NextThreshold(3, DeviceXpMath.ThresholdsDefault, 3));
+        Assert.Equal(3600, DeviceXpMath.NextThreshold(2, DeviceXpMath.ThresholdsDefault, 3));
+        // 已超上限的账本等级（只升不降裁决：属性保留）悬停同样显示 MAX
+        Assert.Equal(-1, DeviceXpMath.NextThreshold(4, DeviceXpMath.ThresholdsDefault, 3));
+    }
+
+    [Fact]
+    public void LevelFromXp_LowerMaxLevel_Caps()
+    {
+        // cfg MaxLevel=3：16800 经验（原本 Lv5）只到 Lv3
+        Assert.Equal(3, DeviceXpMath.LevelFromXp(16800, 3, DeviceXpMath.ThresholdsDefault));
+    }
 }

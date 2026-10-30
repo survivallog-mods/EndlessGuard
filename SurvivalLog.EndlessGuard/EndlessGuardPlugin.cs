@@ -26,6 +26,19 @@ public sealed class EndlessGuardPlugin : BasePlugin
     internal static ConfigEntry<string> GrantPlanIds;
     internal static ConfigEntry<bool> ShowLevel;
     internal static ConfigEntry<bool> ArrowTowerEnabled;
+    internal static ConfigEntry<bool> XPEnabled;
+    internal static ConfigEntry<float> XPMultiplier;
+    internal static ConfigEntry<float> XPThresholdScale;
+    internal static ConfigEntry<int> MaxLevel;
+    internal static ConfigEntry<float> KillBonusRatio;
+    internal static ConfigEntry<float> SandbagXPRate;
+    internal static ConfigEntry<float> WeaponAtkStep;
+    internal static ConfigEntry<float> WeaponIntervalStep;
+    internal static ConfigEntry<float> WeaponHpStepRatio;
+    internal static ConfigEntry<float> WeaponDefFactor;
+    internal static ConfigEntry<float> SandbagHpStepRatio;
+    internal static ConfigEntry<float> SandbagDefFactor;
+    internal static ConfigEntry<float> TowerRangeStep;
 
     public override void Load()
     {
@@ -38,6 +51,19 @@ public sealed class EndlessGuardPlugin : BasePlugin
         GrantPlanIds = Config.Bind("Plans", "GrantPlanIds", "", "补授（多卡版）：逗号分隔的新规划卡 id 列表（如 31607,31633）。进档一次逐卡补入持有名单（不扣点），全部确认后自动清空。");
         ShowLevel = Config.Bind("Defense", "ShowLevel", true, "防御设备悬停名称附显示等级与升级进度（样式A：名称 Lv.N · 升级 x/y，满级 Lv.N MAX）。false=还原官方悬停名。");
         ArrowTowerEnabled = Config.Bind("Defense", "ArrowTowerEnabled", true, "注入新设备「箭塔」：工作台配方（木片×2+铁皮+碎玻璃）+ 防线 Lv4 解锁 + 四表数值行（ID 99005）。false=停止注入；已注入行为进程内存态，本局保留，重启后完全干净。");
+        XPEnabled = Config.Bind("Defense", "XPEnabled", true, "设备经验升级总开关：false=经验系统整体停用（经验入账/等级属性/巡检校准/悬停等级显示全部停，已生效的属性改动本局保留，重启读档后还原官方原厂值）。");
+        XPMultiplier = Config.Bind("Defense", "XPMultiplier", 1.0f, "经验获取倍率：开火/承伤/击杀/反伤入账全部乘这个数（2=升级速度翻倍，0.5=减半）。");
+        XPThresholdScale = Config.Bind("Defense", "XPThresholdScale", 1.0f, "升级阈值整体缩放（>1=更难升级，0.5=阈值减半；基线 1200/3600/8400/16800）。只影响今后的经验判定，已到手的等级不回退。");
+        MaxLevel = Config.Bind("Defense", "MaxLevel", 5, "设备等级上限（1~5；1=关闭成长）。只封顶今后的升级，已超上限的设备属性保留不回退（调回上限自动续上）。");
+        KillBonusRatio = Config.Bind("Defense", "KillBonusRatio", 0.5f, "击杀追加比例：每次开火打死的每只丧尸额外给「该次伤害×比例」的经验（0=关掉击杀加成）。");
+        SandbagXPRate = Config.Bind("Defense", "SandbagXPRate", 2.0f, "沙包承伤经验系数：其他设备掉 1 血得 1 经验，沙包掉 1 血得这么多倍（练功沙袋定位，越高沙包升级越快）。");
+        WeaponAtkStep = Config.Bind("Defense", "WeaponAtkStep", 0.15f, "武器类（尖刺/电网/电锯/箭塔）每级攻击 +15% 的比例（复利累乘；改后 2 秒内对已升级设备自动重算）。");
+        WeaponIntervalStep = Config.Bind("Defense", "WeaponIntervalStep", 0.08f, "武器类每级攻击间隔缩短 8% 的比例（下限=基础间隔的 60%，攻速不会无限制缩；改后 2 秒内自动重算）。");
+        WeaponHpStepRatio = Config.Bind("Defense", "WeaponHpStepRatio", 0.30f, "武器类每级耐久上限 +基础值×此比例（改后 2 秒内对已升级设备自动重算）。");
+        WeaponDefFactor = Config.Bind("Defense", "WeaponDefFactor", 0.90f, "武器类每级受伤×此系数（0.9=每级减伤 10%；1=不减伤；改后 2 秒内自动重算）。");
+        SandbagHpStepRatio = Config.Bind("Defense", "SandbagHpStepRatio", 0.25f, "沙包每级耐久上限 +基础值×此比例（血牛定位，比武器类厚；改后 2 秒内自动重算）。");
+        SandbagDefFactor = Config.Bind("Defense", "SandbagDefFactor", 0.88f, "沙包每级受伤×此系数（0.88=每级减伤 12%，比武器类更能扛；改后 2 秒内自动重算）。");
+        TowerRangeStep = Config.Bind("Defense", "TowerRangeStep", 0.55f, "箭塔射程每级 +此格数（基础射程 3 格，Lv5=3+4×0.55=5.2 格全场大半纵深；改后 2 秒内对已升级箭塔自动重算）。");
 
         // 逐类挂载+异常隔离（2026-10-25 事故教训：PatchAll 整包挂载时单个补丁 IL 编译错会炸掉整个
         // Load()——Ticker/loaded 行全没执行，"补丁在跑轮询全无"的残废态。逐类隔离后坏一个不连坐）。
@@ -55,7 +81,8 @@ public sealed class EndlessGuardPlugin : BasePlugin
         Object.DontDestroyOnLoad(go);
         go.AddComponent<GuardTicker>();
 
-        Trace("loaded：cfg=" + Enabled.Value + "," + PreventNewFalls.Value + "," + RestoreFallenPoints.Value + "," + ExtendScavengePlans.Value);
+        Trace("loaded：cfg=" + Enabled.Value + "," + PreventNewFalls.Value + "," + RestoreFallenPoints.Value + "," + ExtendScavengePlans.Value
+            + "；xp=" + (XPEnabled != null && XPEnabled.Value) + ",tower=" + (ArrowTowerEnabled != null && ArrowTowerEnabled.Value));
         Log.LogInfo("[EndlessGuard] 囤鼠桃园 loaded（拦沦陷/恢复/剥tag/规划扩展）");
         SurvivalLog.ModShared.WelcomeTip.Install(Log);
     }

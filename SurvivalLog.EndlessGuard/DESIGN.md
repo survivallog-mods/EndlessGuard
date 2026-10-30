@@ -13,8 +13,10 @@
 2. **旧档恢复**（RestoreFallenPoints）：已沦陷的交易点/探险图一次清账复活（营地除外）；
 3. **倒计时清场**（StripPendingFallTags）：剥掉缓刑 tag，地图上的沦陷倒计时不再挂着；
 4. **生存规划扩展**（ExtendScavengePlans）：注入 11 条拾遗系列新条目（超市拾遗·六~十 / 医院踏勘·三~五 / 学校摸排·三~五），D100-D300 每 20 天一条——**内容层**扩池解锁新物品（物资份数完全按官方"探索物资"难度，2026-10-25 作者定案撤数量层），给无尽后期持续供给 + 生存点回收（全买 494 点）。
+5. **设备经验升级**（DeviceXp*，spec `docs/superpowers/specs/2026-10-30-defense-upgrade-arrowtower-design.md`）：五件防御设备（沙包 36001/尖刺 36002/电网 36003/电锯 36004/箭塔 99005）打怪承伤攒经验逐级成长，悬停可见等级进度（§2.7）；
+6. **新防御设备：箭塔**（ArrowTower*，同 spec §4）：ID 99005 四表内存注入的高攻速射单体玻璃塔 + 程序化木塔模型 + 索敌动画与追踪箭矢（§2.8）。
 
-配合逻辑：功能 1-3 保供给线（有图可去），功能 4 保产出线（去了有货、越买越富、点数有处花）。
+配合逻辑：功能 1-3 保供给线（有图可去），功能 4 保产出线（去了有货、越买越富、点数有处花），功能 5-6 保防线（守得住、守得久——后期尸潮强度下防御设备从"一次性消耗品"变成长线养成）。
 
 ## 2. 实现原理（反汇编实证）
 
@@ -132,6 +134,23 @@ Harmony postfix 挂 `EndlessManager.Initialize(saveData, gameMode)`（读档补�
 - **营地红线（2026-10-25 细化）**：仅已进入撤离剧情链的营地（campState=Evacuated/Lost）不恢复；普通日程沦陷的营地照常恢复（全量诊断实锤 1100/1101 两营地 campState=0，撤离链未跑、无剧情冲突——原一刀切误伤即作者验收"两个沦陷点不恢复"的根因）。
 - 兜底：存档目录 .snap0-5 + .bak 轮转；全程 trace 自证；装机验证 = 复制存档目录当测试档先跑。
 
+### 2.7 功能 5：设备经验升级（2026-10-30 实现，Task 1-5/9）
+
+机制四层，全部实证见 `docs/superpowers/specs/2026-10-30-defense-upgrade-arrowtower-design.md`（mdump interop 实测 + gamekb dump，地址与签名钉死在各类头注释）：
+
+1. **纯数值内核**（DeviceXpMath.cs，零游戏依赖、单测 101/101）：等级曲线=累计阈值 `{1200,3600,8400,16800}`（"阈值即到达"，一波普通尸潮升不满）；成长复利一律 `Math.Pow`、取整一律 `AwayFromZero`。成长步长/等级上限 Task 9 全部参数化（可选参数默认值=spec §3.5 定值），cfg 直传：武器类攻 `×(1+WeaponAtkStep)^lv`（默认 0.15）、间隔 `×(1−WeaponIntervalStep)^lv`（默认 0.08，下限 0.6×base 不入 cfg）、耐久 `+base×HpStepRatio`（武器 0.30/沙包 0.25/箭塔 0.15 定值）、受伤 `×DefFactor^lv`（武器 0.90/沙包 0.88；箭塔恒 1=无减伤成长）、箭塔射程 `+0.55 格/级`（Lv1 3.0→Lv5 5.2）。
+2. **四锚点 Harmony**（DeviceXpRuntime.cs，逐类自动装配、全 try/catch + trace）：① `FurnitureDurabilityComponent.TakeDamage(int,bool,string,bool)` prefix 缩伤害（ref 写回截断取整；isRepair 不缩）+ postfix 按实掉血入账（沙包 ×2）；② `TowerCombatManager.FireDevice(Furniture, TowerDeviceComponent, IReadOnlyList<long>)` 前缀快照目标 HP、后缀按 `attack×count` 入账 + 快照存活→现在 ≤0 者逐个击杀追加（50%；HP 两次读数均有效才计，防幻影击杀），并 raise 托管侧 `DeviceFired(long,Vector3,long)` 事件（T8 弹道/动画消费）；③ `ApplyZombieBite(Zombie)` 反伤入账（尖刺 CounterDamage）；④ `HitZombieByWreck` 残骸撞尸入账。列表强转兜底链（List→IReadOnlyCollection→告警不记账）消除武器经验静默归零。
+3. **账本 + 巡检对账**（DeviceXpStore.cs + OnStep）：设备键=`(存档槽 GetLastPlayFileName, 家具配置 id, 格子坐标 "x,z")`（不可达退化实例 id）；条目 `{xp,lv}`，原子写（tmp+rename）+损坏容错，路径 `BepInEx/plugins/EndlessGuard_data/device_levels.json`——**mod 本地 JSON，零游戏存档写入**，删 dll 读档即还原官方数值。入账只置脏，GuardTicker 每 2s 统一落盘；巡检同时做读档重放：逐台比对 live 组件值与"账本等级+首见基线"的目标值，漂移才 ApplyLevel 重放（幂等收敛），**cfg 步长改动同经此通道 2 秒内自动重算已升级设备**。校准熔断器（RecalFuse）：连续 3 步不收敛即停（封死官方钳制 MaxDurability 时的每 2s 回血循环），槽切换复位。
+4. **升级生效与展示**：ApplyLevel 直写 `TowerDeviceComponent.Attack/AttackIntervalSeconds`（+箭塔 `AttackRangeSqr`=TargetRange²）与 `FurnitureDurabilityComponent.AddMaxDurability/AddCurrentDurability`（正增量回满=升级满血语义）；基线"首见即拍"先于任何改写。悬停（DeviceXpHover）postfix 挂 `Furniture.PushTowerDeviceHoverName(bool)`（反汇编逐指令实证显示名通道=NotifyInstance 0x45A→AgentModel.Furniture_SetDisplayName，可写），同通道重推「名称 Lv.N · 升级 x/y」（满级 MAX）。
+
+**cfg 门（Task 9）**：`Defense.XPEnabled=false` → `XpOn()` 门让全部 XP 补丁早退（无入账/无减伤写回/无对账/悬停官方原名），账本冻结不改写；已生效属性本局保留，重启读档还原官方原厂值。箭塔 FX 喂养（NoteTower）在 XP 关时照走——特效属塔本体，归 `Defense.ArrowTowerEnabled` 管。其余旋钮（倍率/阈值缩放/等级上限/各类步长）读侧直取 `ConfigEntry.Value`：改值即刻生效，步长类经巡检 2 秒内重算；`MaxLevel` 只封顶今后升级（只升不降裁决，已超上限的账本等级属性保留，调回自动续上）。
+
+### 2.8 功能 6：新防御设备「箭塔」（ID 99005，Task 6-8）
+
+1. **四表内存注入**（ArrowTower.cs，ScavengePlans 同款巡检模式）：`Config_TowerDevice`（攻 14/间隔 1.5s/射程 3.0/单体 MaxHitTargets=1/可被 3 尸咬/HP 100=电锯一半/耗电 6/箭矢不减速）+ `Config_Furniture`（结构字段全量照抄 36004 电锯行，仅覆盖名称/ResName=P_Tripo05/HP/耗电）+ `Config_Item`（包裹，TargetFurnitureID=99005，UseAction 复用官方拆封动作 100026004）+ `Config_ProductionList`（配方=木片×2+铁皮+碎玻璃，defense_exp=25）。ID 取 **99xxx 预留段**（作者裁决：紧贴官方空位必撞号）。`Config_DefenseLv.Lv4.unlock_recipes [403]→[403,99005]`（与电锯同档）。行级幂等 upsert + 五 dict 哨兵复查（官方 Initialize 重建表后自动重放）；全列表字段非 null（官方消费方直读 .Count）。
+2. **程序化模型**（ArrowTowerModel.cs，spec §4.3 v2 精致版）：约 60 图元/≈900 面内存拼装木质望塔（石基+挑台+垛口+四坡顶+旗），材质克隆已放置设备 URP 材质改色（三级降级链：克隆→Shader.Find→Sprites/Default）。**Spike 结论**（对 10-29 build 逐指令核读）：`BattleResource` 缓存是归还复用池（TryGetCache=弹出非查询），直接 StorePrefab 我方模板会被 AddCache 杀掉——故改为 **Harmony postfix 挂三个 `LoadGameObject` 重载**：path 含「P_Tripo05」且 `__result==null`（miss 返 null 不抛）时补发模板 Instantiate 并镜像命中路径后处理（`__result` ref 回写 + IsByRef 静态核验）；失败两态隔离（补丁漂移→官方兜底盒+告警，postfix 异常→原样放行）。锚点「Head」（旋转弩机）/「Flag」（旗）为根的直接子物体，供 T8。
+3. **动画与弹道**（ArrowTowerFx.cs + ArrowTowerFxMath.cs，纯函数单测）：per-frame MonoBehaviour（双构造器 + public 生命周期，interop 桥接红线）；待机弩机 ±15° 正弦扫描、旗 ±16° 摆动；订阅 DeviceFired 索敌转向（120°/s 上限，待机/追踪共用 world→local yaw 换算）+ 0.2s 后坐；**追踪式箭矢=必命中表现层**（伤害在 FireDevice 内即时结算，箭只追目标实时位置，0.25s 上限/死亡飞最后已知点，并发 ≤8）。升级脉冲经 RenderPulse() 队列转投（Head 缩放 0.6s，emissive 不可靠裁决见类头⑥）。整组件门=**仅 `Defense.ArrowTowerEnabled`**（FX 属塔本体；总开关关时模型 Supply 拒供天然静默）。
+
 ## 3. 代码结构（规划，实现时落地）
 
 | 文件 | 职责 |
@@ -140,6 +159,13 @@ Harmony postfix 挂 `EndlessManager.Initialize(saveData, gameMode)`（读档补�
 | `FallBlocker.cs`（暂名） | 功能 1：FallMapPoint prefix + 拦截计数自证 |
 | `FallRestorer.cs`（暂名） | 功能 2+3：读档后四步清账 + tag 剥除 + trace |
 | `ScavengePlans.cs`（暂名） | 功能 4：数值总表/篮子/降档**代码单源**；Talent+ConditionSet 表注入；洞察注册表追加；GameSetting 写入与重载兜底 |
+| `DeviceXpMath.cs` | 功能 5 纯数值内核：曲线/成长目标/经验结算/巡检漂移判定/校准熔断器（零游戏依赖，单测直测） |
+| `DeviceXpStore.cs` | 功能 5 经验账本：mod 本地 JSON 原子读写（tmp+rename）/损坏容错（单测直测） |
+| `DeviceXpRuntime.cs` | 功能 5 运行时：四锚点补丁 + 入账 Award + 升级生效 ApplyLevel + 2s 巡检对账 + XP 门与 cfg 旋钮接线 |
+| `DeviceXpHover.cs` | 功能 5 悬停：PushTowerDeviceHoverName postfix 同通道重推等级进度（样式A） |
+| `ArrowTower.cs` | 功能 6：99005 四表注入 + 防线 Lv4 解锁登记（幂等+哨兵重放） |
+| `ArrowTowerModel.cs` | 功能 6：程序化木塔 prefab + LoadGameObject×3 postfix 供货（spike 结论在类头） |
+| `ArrowTowerFx.cs` / `ArrowTowerFxMath.cs` | 功能 6：索敌动画/后坐/追踪箭矢逐帧层 + 其纯函数内核（单测直测） |
 | `ModShared\WelcomeTip.cs` | 共享源码（csproj 链入，套件统一防盗署名） |
 
 ## 4. 配置项（com.local.survivallog.endlessguard.cfg）
@@ -149,8 +175,17 @@ Harmony postfix 挂 `EndlessManager.Initialize(saveData, gameMode)`（读档补�
 | `PreventNewFalls` | true | 拦截全部新沦陷（三模式通吃） |
 | `RestoreFallenPoints` | true | 读档后恢复已沦陷交易点/探险图（营地按剧情链状态区分） |
 | `ExtendScavengePlans` | true | 注入 11 条拾遗扩展条目（含注册表追加+内容层落表） |
+| `GrantPlanId` / `GrantPlanIds` | 0 / 空 | 购买丢卡补授（单卡/逗号多卡；进档一次自动补入不扣点，补完自清） |
+| `Defense.XPEnabled` | true | 设备经验总开关：false=入账/等级属性/巡检对账/悬停全停（已生效属性本局保留，重启读档还原官方） |
+| `Defense.XPMultiplier` / `XPThresholdScale` | 1.0 / 1.0 | 经验倍率 / 阈值缩放（基线 1200/3600/8400/16800） |
+| `Defense.MaxLevel` | 5 | 等级上限（1~5；只封顶今后升级，只升不降） |
+| `Defense.KillBonusRatio` / `SandbagXPRate` | 0.5 / 2.0 | 击杀追加比例 / 沙包承伤经验倍率 |
+| `Defense.WeaponAtkStep` / `WeaponIntervalStep` / `WeaponHpStepRatio` / `WeaponDefFactor` | 0.15 / 0.08 / 0.30 / 0.90 | 武器类每级攻/间隔/血/受伤系数（spec §3.5 定值；改动经巡检 2 秒内重算） |
+| `Defense.SandbagHpStepRatio` / `SandbagDefFactor` | 0.25 / 0.88 | 沙包每级血/受伤系数 |
+| `Defense.TowerRangeStep` | 0.55 | 箭塔射程每级 +格数（箭塔 HP 步长 0.15 与减伤 1.0 为 §4.1 裁定值，不入 cfg） |
+| `Defense.ShowLevel` / `ArrowTowerEnabled` | true / true | 悬停等级显示 / 箭塔注入开关（Task 5/6 绑定） |
 
-配置只剩三键（2026-10-25 作者定案：StripPendingFallTags/RichnessStep 撤除——剥倒计时 tag 无条件执行、物资份数完全按官方"探索物资"难度档，零接触官方函数）；旧 cfg 文件里的孤儿键 BepInEx 自动忽略，无需手清。
+剥倒计时 tag 无条件执行、物资份数完全按官方"探索物资"难度档（2026-10-25 作者定案：StripPendingFallTags/RichnessStep 撤除）；旧 cfg 文件里的孤儿键 BepInEx 自动忽略，无需手清。
 
 注意 cfg 首跑固化坑（CabinetEverywhere 教训）：新键上线时旧 cfg 缺键给默认值并日志提示一次。
 
@@ -195,6 +230,9 @@ Harmony postfix 挂 `EndlessManager.Initialize(saveData, gameMode)`（读档补�
   - Harmony postfix：`EndlessManager::Initialize(GameSaveData, GameMode)`（0x2653EE0）
   - （已撤）`DifficultyTools::RollExploreLootCopies` postfix——2026-10-25 数量层移除，官方函数零接触
   - 兜底（如需）：`ExploreDiscoveryTools::GetDiscoveryLv`（0x2825E80）/ `_registryLoaded` 静态字段重载
+  - 功能 5 四锚点（2026-10-30，签名钉死见 DeviceXpRuntime 类头）：prefix `FurnitureDurabilityComponent::TakeDamage(Int32,Boolean,String,Boolean)`；postfix `TowerCombatManager::FireDevice(Furniture,TowerDeviceComponent,IReadOnlyList<Int64>)` / `TowerCombatManager::ApplyZombieBite(Zombie)` / `TowerCombatManager::HitZombieByWreck(Furniture,Zombie,Int32,Boolean)`
+  - 功能 5 悬停：postfix `Furniture::PushTowerDeviceHoverName(Boolean)`（0x306AAB0，10-23 RVA）
+  - 功能 6 模型供货：postfix `BattleResource::LoadGameObject` ×3 重载（现行 RVA 见 ArrowTowerModel 类头 spike 结论；10-23 gamekb 的 0x2EE3910 已漂移）
 - **沦陷链地址**：ApplyFallenMapPoints 0x2649140 / RecomputeTier 0x265BB80 / OnDayChanged 0x26586F0 / OnCasualDayChanged 0x26578C0 / TrySealTradeAccess 0x2665FC0 / IsCampFallen 0x2654390
 - **洞察/刷货链地址**：ExploreDiscoveryTools.GetDiscoveryLv 0x2825E80 / EnsureRegistry 0x2825710 / GetInsightMapForCard 0x2826440；FurnitureLootManager.RefreshForCurrentMap 0x26D2DC0 / AppendDiscoveryWave 0x26D1BB0；GroundLootManager.RollAndSpawn 0x26E9D20 / SpawnForCurrentMap 0x26E9F50 / SpawnOneAnchor 0x26EA440；FurnitureLootTools.FillRandomLoot 0x283D600；DifficultyTools.RollExploreLootCopies 0x31BC080
 - **字段偏移**：GameSaveData.FallenMapPointIds @0xE0（List\<Int32\>，访问器内联属正常）；Config_Furniture：LootRandomGroupId@0x128 / P1-P4 角色变体池 0x12C-0x138 / LootRandomCount@0x13C
@@ -214,6 +252,8 @@ Harmony postfix 挂 `EndlessManager.Initialize(saveData, gameMode)`（读档补�
 - 2026-10-25 购买丢卡真根因（·六/·七/学校·三 三连定案，推翻此前"撞表重建窗口"归因）：官方购买链 `OnBuySurvivalPlan`(0x2833A30) 先扣点(0x2833BA6)后唯一落档点=`SurvivalPlanningComponent.AddBuff`(0x30187A0)；AddBuff 主门(0x3018A75 gate)=`BuffID>0 ∨ id==32111 ∨ GetInsightMapForCard>0 ∨ 在组件静态数组`，门不过**静默 return（点已扣卡不加零报错）**。`GetInsightMapForCard`(0x2826440) 只查 `_mapByCard` 反向表（静态偏移 0x18）——本 mod 此前只补 `_cardsByMap` 正向表，反向缺项→三次丢卡。修法=AppendRegistry 每轮同步反射补 `_mapByCard[卡]=图`（幂等，防 EnsureRegistry 重建换对象每轮重取实例）；两张已扣点卡经 `GrantPlanIds`（多卡补授 cfg，逗号分隔）免费补回。过门后官方链自动走全：+0x40 激活表 Add→RecordInsightBuy(0x2826A90)→NotifySurvivalPlanningUpdate(0x301D510, T列表即时刷新)；静态数组(bpl=1)尾段仅多背包扩格 ApplyBagGridExpansion，洞察卡无需。
 - 2026-10-25 晚 官方管道锚点实弹翻车+回滚（教训入库）：465 项事故根因=启动竞态（注入完成 22:26:31，PlanPick 目录抢在 :29~:31 帧隙构建且终身缓存不重建）。曾按作者方向"复用官方方案"改挂官方装表 async 状态机 `ConfigManager.<Initialize>d__256`（MoveNext 0x30A4E70，E8 证调用方=EnterMain+LogInitFailure）步进随行注入、废 GuardTicker——**实机部署即翻车**：~10Hz 无限重注（2 分钟 1.3 万行），tier清空/篮子同被反复重放，表每步被重建回官方态，游戏卡在加载（疑似装表中途注入破坏加载→Initialize 重试循环，LogInitFailure 正是重试调用方），杀进程回滚。**结论：装表进行中禁碰表；巡检的静默失败期（表 null 即 return）恰好天然避开装表窗口，这是它整个下午稳定的原因。**回滚后 GuardTicker 恢复（Tick→OnConfigStep 更名保留，registry 表未齐 NRE 改同文 once-latch 保留）。465 事故的真正修复落在 PlanPick 侧目录行数失效复核（其 DESIGN §11）——注入晚到 2s 内目录自动重建，竞态后果消除。免巡检方向若再试：锚点改 `GameEntrance.EnterMain` 续体（Initialize 完成、表稳定后才推进），且必须先离线论证其状态机不被逐帧泵。
 - 版本与发版（2026-10-28 起，v2 迁移后）：版本号单源=本仓 csproj <Version>（作者定义）；单 mod 发版=本仓 .\release.ps1；ModShared 改动源=中枢仓 suite\ModShared（push_modshared 推送）。
+- 2026-10-30 功能 5/6（设备经验升级+箭塔）落地（Task 1-8 分八次提交，机制记录见 §2.7/§2.8）：曲线/账本/四锚点/巡检熔断/悬停/四表注入/程序化模型/动画弹道，单测随 Task 1/4/8 逐层入库（DeviceXpMath/DeviceXpStore/ArrowTowerFxMath 三组契约测试）。
+- 2026-10-30 Task 9 cfg 收尾：spec §3.5 全表 13 键接进 `Defense.*`（EndlessGuardPlugin.Load 绑定，DeviceXpRuntime 属性直取 ConfigEntry.Value；步长类经巡检 2 秒重算，`MaxLevel` 夹在 [1,5] 只封顶今后升级）；`Defense.XPEnabled` 门（XpOn()）贯穿四锚点+悬停+巡检，XP 关时塔 FX 喂养照走。DeviceXpMath 成长函数步长/上限参数化（可选参数默认值=spec 定值，老调用零改动）。文档三件（README/DESIGN/CHANGELOG）同步；版本号留作者定号（csproj 不动）。
 
 ## 10. 防盗署名气泡（套件统一）
 

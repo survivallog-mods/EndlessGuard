@@ -12,7 +12,8 @@ namespace SurvivalLog.EndlessGuard;
 /// §3.7 样式A，作者拍板）：后缀挂 Furniture.PushTowerDeviceHoverName(bool)，在官方悬停名推送之后把
 /// 同一通道再推一次「名称 Lv.N · 升级 x/y」（满级「Lv.N MAX」）。后缀晚于原方法执行=最后写入者，
 /// 官方名先落、增强名后盖，悬停关闭由官方 OnCloseName 还原，零残留。
-/// cfg：Defense.ShowLevel（默认 true；EndlessGuardPlugin.Load 绑定）。
+/// cfg：Defense.ShowLevel（默认 true；EndlessGuardPlugin.Load 绑定）+ Defense.XPEnabled（Task 9：
+/// false=悬停不加等级，官方原名）。
 ///
 /// ===== Step-1 反汇编实证（Iced 反汇编 GameAssembly.dll @ dump.cs RVA 0x306AAB0，2026-10-30；非仅接口推断）=====
 /// PushTowerDeviceHoverName(bool broken) 原体逐指令可读，全部调用点带符号名：
@@ -60,6 +61,7 @@ internal static class DeviceXpHover
         {
             if (__instance == null) return;
             if (EndlessGuardPlugin.Enabled != null && !EndlessGuardPlugin.Enabled.Value) return;   // 总开关关=字节透传
+            if (!DeviceXpRuntime.XpOn()) return;   // Defense.XPEnabled=false=悬停不加等级（Task 9 门）
             if (EndlessGuardPlugin.ShowLevel != null && !EndlessGuardPlugin.ShowLevel.Value) return;   // Defense.ShowLevel=false=官方原名
             if (!DeviceXpRuntime.TryGetLevelInfo(__instance, out var lv, out var xp, out var next)) return;
             if (lv <= 1 && xp <= 0) return;   // Lv1 零经验=无可展示，官方原名零污染
