@@ -20,6 +20,11 @@
     <EmbeddedResource Include="scavenge_plans.json" />
   </ItemGroup>
 
+  <!-- 单测工程（Task 1 device-xp）：链接 DeviceXpMath.cs 源文件编译，internal 经此可见 -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="SurvivalLog.EndlessGuard.Tests" />
+  </ItemGroup>
+
   <ItemGroup>
     <Reference Include="BepInEx.Core">
       <HintPath>E:\SteamLibrary\steamapps\common\Survival Log\BepInEx\core\BepInEx.Core.dll</HintPath>

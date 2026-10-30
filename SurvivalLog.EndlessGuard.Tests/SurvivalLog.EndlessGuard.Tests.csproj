@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>SurvivalLog.EndlessGuard.Tests</AssemblyName>
+    <RootNamespace>SurvivalLog.EndlessGuard.Tests</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!-- 纯数值内核按单文件链接（device-xp 契约）：不引主工程——主工程依赖游戏 DLL，测试上下文没有 -->
+  <ItemGroup>
+    <Compile Include="../SurvivalLog.EndlessGuard/DeviceXpMath.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.5.0" />
+    <PackageReference Include="xunit" Version="2.4.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.4.5" />
+  </ItemGroup>
+
+</Project>
