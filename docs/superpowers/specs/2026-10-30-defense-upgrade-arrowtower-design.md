@@ -132,7 +132,7 @@
 
 ### 3.5 配置项（cfg）
 
-`Defense.XPEnabled`（总开关，默认 true）、`Defense.XPMultiplier`（默认 1.0）、`Defense.XPThresholdScale`（阈值缩放，默认 1.0）、`Defense.MaxLevel`（默认 5）、`Defense.KillBonusRatio`（默认 0.5）、`Defense.SandbagXPRate`（沙包承伤经验系数，默认 2.0）、`Defense.WeaponAtkStep/IntervalStep/HpStep/DefFactor`、`Defense.SandbagHpStep/DefFactor`、`Defense.TowerRangeStep`（箭塔射程成长，默认 0.55）、`Defense.ShowLevel`（等级显示开关，默认 true）（默认即 §3.2 数值）。
+`Defense.XPEnabled`（总开关，默认 true）、`Defense.XPMultiplier`（默认 1.0）、`Defense.XPThresholdScale`（阈值缩放，默认 1.0）、`Defense.MaxLevel`（默认 5）、`Defense.KillBonusRatio`（默认 0.5）、`Defense.SandbagXPRate`（沙包承伤经验系数，默认 2.0）、`Defense.WeaponAtkStep/WeaponIntervalStep/WeaponHpStepRatio/WeaponDefFactor`、`Defense.SandbagHpStepRatio/SandbagDefFactor`（实现键名，与 README 表一致）、`Defense.TowerRangeStep`（箭塔射程成长，默认 0.55）、`Defense.ShowLevel`（等级显示开关，默认 true）（默认即 §3.2 数值）。
 
 ### 3.7 等级查看设计（作者 2026-10-30 拍板：**样式A 悬停详情**）
 
