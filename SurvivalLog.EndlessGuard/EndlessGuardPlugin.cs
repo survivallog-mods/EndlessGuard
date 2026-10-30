@@ -25,6 +25,7 @@ public sealed class EndlessGuardPlugin : BasePlugin
     internal static ConfigEntry<int> GrantPlanId;
     internal static ConfigEntry<string> GrantPlanIds;
     internal static ConfigEntry<bool> ShowLevel;
+    internal static ConfigEntry<bool> ArrowTowerEnabled;
 
     public override void Load()
     {
@@ -36,6 +37,7 @@ public sealed class EndlessGuardPlugin : BasePlugin
         GrantPlanId = Config.Bind("Plans", "GrantPlanId", 0, "补授：因注入窗口事故丢失持有的新规划卡 id（如 31606=超市拾遗·六）。设值后进档一次即写入持有名单（不扣点），补完自动清零。0=关闭。");
         GrantPlanIds = Config.Bind("Plans", "GrantPlanIds", "", "补授（多卡版）：逗号分隔的新规划卡 id 列表（如 31607,31633）。进档一次逐卡补入持有名单（不扣点），全部确认后自动清空。");
         ShowLevel = Config.Bind("Defense", "ShowLevel", true, "防御设备悬停名称附显示等级与升级进度（样式A：名称 Lv.N · 升级 x/y，满级 Lv.N MAX）。false=还原官方悬停名。");
+        ArrowTowerEnabled = Config.Bind("Defense", "ArrowTowerEnabled", true, "注入新设备「箭塔」：工作台配方（木片×2+铁皮+碎玻璃）+ 防线 Lv4 解锁 + 四表数值行（ID 99005）。false=停止注入；已注入行为进程内存态，本局保留，重启后完全干净。");
 
         // 逐类挂载+异常隔离（2026-10-25 事故教训：PatchAll 整包挂载时单个补丁 IL 编译错会炸掉整个
         // Load()——Ticker/loaded 行全没执行，"补丁在跑轮询全无"的残废态。逐类隔离后坏一个不连坐）。
@@ -88,5 +90,6 @@ internal sealed class GuardTicker : MonoBehaviour
         if (EndlessGuardPlugin.Enabled != null && !EndlessGuardPlugin.Enabled.Value) return;   // 总开关关=轮询停（已生效改动保留，重启干净）
         try { ScavengePlans.OnConfigStep(); } catch (Exception e) { EndlessGuardPlugin.Trace("ticker ScavengePlans: " + e.Message); }
         try { DeviceXpRuntime.OnStep(); } catch (Exception e) { EndlessGuardPlugin.Trace("ticker DeviceXp: " + e.Message); }
+        try { ArrowTower.OnStep(); } catch (Exception e) { EndlessGuardPlugin.Trace("ticker Tower: " + e.Message); }
     }
 }
