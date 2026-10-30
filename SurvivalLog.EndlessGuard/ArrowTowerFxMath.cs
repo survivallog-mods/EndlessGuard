@@ -64,6 +64,17 @@ internal static class ArrowTowerFxMath
     public static float ArrowStep(float dist, float dt) =>
         MathF.Min(ArrowSpeed * MathF.Max(dt, 0f), MathF.Max(dist, 0f));
 
+    /// <summary>③ 世界系 yaw → Head 局部系 yaw（减父链世界朝向，(-180,180] 归一）。
+    /// 待机/追踪两分支共用同一换算（F1 参照系统一修复：修复前待机分支在已是局部的 yaw 上重复减父朝向，
+    /// 旋转塔根时待机面向错误中心）。</summary>
+    public static float ToLocalYawDeg(float worldYaw, float parentWorldYaw) =>
+        Wrap180(worldYaw - parentWorldYaw);
+
+    /// <summary>③ 待机扫描中心的世界系 yaw = 塔根（父链）世界朝向 + Head 基准局部朝向
+    /// ——塔根带旋转时待机中心=塔根朝向本身（模板 Head 基准局部=0）。</summary>
+    public static float IdleCenterWorldYawDeg(float parentWorldYaw, float headBaseLocalYaw) =>
+        parentWorldYaw + headBaseLocalYaw;
+
     /// <summary>角度归一到 (-180,180]。</summary>
     private static float Wrap180(float a)
     {

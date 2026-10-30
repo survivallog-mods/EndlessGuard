@@ -208,12 +208,17 @@ internal sealed class ArrowTowerFx : MonoBehaviour
             }
         }
 
-        // ①③ 转向统一走 120°/s 步进（待机正弦峰速≈47°/s 远低于上限，正弦不被削顶）：
-        var targetYaw = aimValid
-            ? Mathf.Atan2(aim.x - t.Head.position.x, aim.z - t.Head.position.z) * Mathf.Rad2Deg
-            : t.HeadBaseEuler.y + ArrowTowerFxMath.IdleYawDeg(now);
+        // ①③ 转向统一走 120°/s 步进（待机正弦峰速≈47°/s 远低于上限，正弦不被削顶）。
+        // 参照系统一（F1 修复）：两分支都先产出【世界系】yaw，再共用 ToLocalYawDeg 换算入局部——
+        // 修复前待机分支在局部系（HeadBaseEuler 取自 localEulerAngles）上又减 parentYaw，塔根带
+        // 摆放旋转时待机朝错心；现两分支同换算必同对。待机中心=塔根朝向+Head 基准局部朝向。
         var parentYaw = t.Head.parent != null ? t.Head.parent.eulerAngles.y : 0f;
-        var yaw = ArrowTowerFxMath.StepYawDeg(t.Head.localEulerAngles.y, targetYaw - parentYaw,
+        var targetYawWorld = aimValid
+            ? Mathf.Atan2(aim.x - t.Head.position.x, aim.z - t.Head.position.z) * Mathf.Rad2Deg
+            : ArrowTowerFxMath.IdleCenterWorldYawDeg(parentYaw, t.HeadBaseEuler.y)
+              + ArrowTowerFxMath.IdleYawDeg(now);
+        var yaw = ArrowTowerFxMath.StepYawDeg(t.Head.localEulerAngles.y,
+            ArrowTowerFxMath.ToLocalYawDeg(targetYawWorld, parentYaw),
             ArrowTowerFxMath.TrackYawSpeedDeg * dt);
 
         t.Head.localEulerAngles = new Vector3(t.HeadBaseEuler.x, yaw, t.HeadBaseEuler.z);
@@ -314,7 +319,9 @@ internal sealed class ArrowTowerFx : MonoBehaviour
 
     private static void SpawnArrow(TowerFx t, Vector3 muzzle, long targetId)
     {
-        if (Arrows.Count >= ArrowTowerFxMath.MaxArrows) KillArrow(0);   // 并发 ≤8，超限杀最老
+        // 封顶即建即毁（非复用池——「对象池≤8」约束的语义是并发上限；派箭率 ~0.67 发/s/塔，
+        // Instantiate 成本可忽略，T8 评审 M1 知悉项）：超限杀最老（List 插入序=派生序）
+        if (Arrows.Count >= ArrowTowerFxMath.MaxArrows) KillArrow(0);
         if (_arrowTemplate == null && !BuildArrowTemplate()) return;
 
         var clone = Object.Instantiate(_arrowTemplate);

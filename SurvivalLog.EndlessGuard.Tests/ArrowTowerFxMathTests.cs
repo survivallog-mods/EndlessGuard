@@ -94,6 +94,28 @@ public class ArrowTowerFxMathTests
         Equal(30f, ArrowTowerFxMath.StepYawDeg(30f, 55f, -3f), 1e-4f);   // 防御：负 step=原地
     }
 
+    // ---- ③ 世界→局部参照系统一（F1 修复契约：待机/追踪共用同一换算） ----
+
+    [Fact]
+    public void YawFrames_RotatedRoot90_IdleCenterIsRootFacing()
+    {
+        // 塔根旋转 90°（Head 基准局部 0）：待机中心世界系=90（=塔根朝向），
+        // 经共用换算入局部=0（弩机正对塔根前方摆 ±15°，不再偏 −90）
+        var centerWorld = ArrowTowerFxMath.IdleCenterWorldYawDeg(90f, 0f);
+        Equal(90f, centerWorld, 1e-4f);
+        Equal(0f, ArrowTowerFxMath.ToLocalYawDeg(centerWorld, 90f), 1e-4f);
+    }
+
+    [Theory]
+    [InlineData(0f, 90f, -90f)]     // 塔根 90°、目标在世界 0° → 局部 -90（评审指定用例）
+    [InlineData(90f, 90f, 0f)]      // 目标正对塔根朝向 → 局部 0
+    [InlineData(45f, 0f, 45f)]      // 塔根无旋转 → 世界=局部
+    [InlineData(-90f, 90f, 180f)]   // 差 -180 归一到 (-180,180] 上沿
+    public void ToLocalYawDeg_SubtractsParentWorldYaw(float worldYaw, float parentYaw, float expected)
+    {
+        Equal(expected, ArrowTowerFxMath.ToLocalYawDeg(worldYaw, parentYaw), 1e-4f);
+    }
+
     // ---- ④ 后坐三角波 ----
 
     [Theory]
