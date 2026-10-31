@@ -42,6 +42,16 @@ namespace SurvivalLog.EndlessGuard;
 /// _colliderId/_collider/Obj/Type/FloorId/IsFloorExempt/HiddenByCamera/ColliderHiddenByDock/
 /// ModelState/IsModelContainerHidden。成员不可达（interop 漂移）→ 打
 /// `[SEL] diag member unreachable: &lt;name&gt;`（每名一次）后继续，绝不抛出。
+///
+/// 增补两组（同日，diag-only 同口径）：
+/// 5. 屏幕投点 [SEL][pos]：对比轮完成时刻 + 其后 5 分钟内每 30s 重投（相机移动后作者/控制器要新坐标；
+///    硬上限 10s 一条 + 同行去重）。对同一对设备（官方 36001-36004 / 塔 BaseCfgOf==99005）各打
+///    `[SEL][pos] &lt;tag&gt; cfg=.. screen=&lt;x&gt;,&lt;y&gt; world=&lt;x&gt;,&lt;y&gt;,&lt;z&gt; visible=&lt;bool&gt;`
+///    ——Camera.main.WorldToScreenPoint(模型根 transform.position)，visible=z&gt;0 且 xy 在屏幕内；
+///    Camera.main=null 只 trace 一次；设备被移除（interop 读抛）即关窗停投。
+/// 6. 模型根组件对比 [SEL][cmp] …rootComps/children：cmp dump 里两台设备的模型根 GameObject 全组件
+///    类型名清单（含 Behaviour/缺失件=null）+ 一级子名清单——对照官方 prefab 自带而我方拼装根没有的
+///    组件（FSM 助手/旋转驱动等选取链依赖）。
 /// </summary>
 internal static class TowerSelDiag
 {
@@ -181,6 +191,12 @@ internal static class TowerSelDiag
     private static bool _cmpDone, _waitTraced, _pumpAttached;
     private static float _acc;
 
+    // ── 3b. 屏幕投点状态（对比轮同刻首投 + 5 分钟窗内每 30s 重投；10s 硬上限 + 同行去重）──
+    private static Furniture _posOfficial, _posTower;   // 对比轮登记的两台（销毁/移除=interop 读抛→关窗）
+    private static float _posUntil, _nextPosAt, _lastPosTrace;
+    private static readonly Dictionary<string, string> _lastPosLine = new();
+    private static bool _camNullTraced;
+
     private static AgentModelManager LiveAmm()
     {
         try
@@ -199,10 +215,21 @@ internal static class TowerSelDiag
             if (!_pumpAttached)
             {
                 _pumpAttached = true;
-                EndlessGuardPlugin.Trace("[SEL] pump attached (TowerSelDiag live: selectShow/hits/cmp/refresh)");
+                EndlessGuardPlugin.Trace("[SEL] pump attached (TowerSelDiag live: selectShow/hits/cmp/refresh/pos)");
             }
-            if (_cmpDone && ReferenceEquals(amm, _seenAmm)) return;    // 稳态一次引用比较
-            if (!ReferenceEquals(amm, _seenAmm)) { _seenAmm = amm; _cmpDone = false; _waitTraced = false; }
+            if (ReferenceEquals(amm, _seenAmm))
+            {
+                if (!_cmpDone) return;                     // 稳态：其余帧一次引用比较即出
+                var now = Time.unscaledTime;
+                if (now < _posUntil && now >= _nextPosAt)
+                {
+                    _nextPosAt = now + 30f;                // 5 分钟窗内每 30s 重投（相机移动后的新坐标）
+                    DumpScreenPos();
+                }
+                return;
+            }
+            _seenAmm = amm; _cmpDone = false; _waitTraced = false;
+            _posUntil = 0f;                                // 换场景=投点窗口作废
             if (amm == null) return;
             _acc += Time.unscaledDeltaTime;
             if (_acc < 1f) return;                                     // 每场景一次的对比按 1s 步进试
@@ -255,6 +282,29 @@ internal static class TowerSelDiag
                                  + Get(() => amm.CurrentViewFloor, "AgentModelManager.CurrentViewFloor") + " ===");
         DumpModelOf(amm, official, "official");
         DumpModelOf(amm, tower, "tower");
+
+        // 3b：登记投点对 + 开 5 分钟重投窗，对比完成的同一刻先投第一轮
+        _posOfficial = official; _posTower = tower;
+        _posUntil = Time.unscaledTime + 300f;
+        _nextPosAt = Time.unscaledTime;
+        DumpScreenPos();
+    }
+
+    /// <summary>家具→AgentModel 三键只读试解（showId→instId→logicId；key=命中键，全 null 即不在缓存）。</summary>
+    private static AgentModel ResolveModel(AgentModelManager amm, Furniture f, out string key)
+    {
+        key = "none";
+        var showId = Get(() => f.ShowInstanceId, "Furniture.ShowInstanceId");
+        var instId = Get(() => f.InstanceId, "Furniture.InstanceId");
+        var m = Get(() => amm.GetAgentModel(showId), "AgentModelManager.GetAgentModel");
+        key = "showId";
+        if (m == null) { m = Get(() => amm.GetAgentModel(instId), "AgentModelManager.GetAgentModel"); key = "instId"; }
+        if (m == null)
+        {
+            m = Get(() => amm.GetAgentModelByLogicInstanceId(instId), "AgentModelManager.GetAgentModelByLogicInstanceId");
+            key = "logicId";
+        }
+        return m;
     }
 
     /// <summary>单台家具→AgentModel 解析与可读字段 dump。model=NULL 一行即答案本身。</summary>
@@ -266,14 +316,7 @@ internal static class TowerSelDiag
             var showId = Get(() => f.ShowInstanceId, "Furniture.ShowInstanceId");
             var instId = Get(() => f.InstanceId, "Furniture.InstanceId");
 
-            var m = Get(() => amm.GetAgentModel(showId), "AgentModelManager.GetAgentModel");
-            var key = "showId";
-            if (m == null) { m = Get(() => amm.GetAgentModel(instId), "AgentModelManager.GetAgentModel"); key = "instId"; }
-            if (m == null)
-            {
-                m = Get(() => amm.GetAgentModelByLogicInstanceId(instId), "AgentModelManager.GetAgentModelByLogicInstanceId");
-                key = "logicId";
-            }
+            var m = ResolveModel(amm, f, out var key);
 
             EndlessGuardPlugin.Trace("[SEL][cmp] " + tag + " cfg=" + cfg + " showId=" + showId
                                      + " instId=" + instId + " model=" + (m != null ? "found" : "NULL")
@@ -312,9 +355,110 @@ internal static class TowerSelDiag
             var kids = Get(() => obj.transform.childCount, "Transform.childCount");
             EndlessGuardPlugin.Trace("[SEL][cmp] " + tag + " obj=" + rootName + " layer=" + rootLayer
                                      + " childCount=" + kids + " active=" + Get(() => obj.activeSelf, "GameObject.activeSelf"));
+            DumpRootShape(tag, obj);
             DumpColliders(amm, tag, obj);
         }
         catch (Exception e) { EndlessGuardPlugin.Trace("[SEL][cmp] " + tag + ": " + e.Message); }
+    }
+
+    // ── 3b. 屏幕投点（Camera.main.WorldToScreenPoint；只读）──────────────────────
+
+    /// <summary>投点一轮（两台各一行）。10s 硬上限 + 同行去重；相机缺失只 trace 一次。</summary>
+    private static void DumpScreenPos()
+    {
+        try
+        {
+            var now = Time.unscaledTime;
+            if (_lastPosTrace > 0f && now - _lastPosTrace < 10f) return;   // 硬上限（30s 节奏天然在内）
+            var cam = Get(() => Camera.main, "Camera.main");
+            if (cam == null)
+            {
+                if (!_camNullTraced)
+                {
+                    _camNullTraced = true;
+                    EndlessGuardPlugin.Trace("[SEL][pos] Camera.main=null（无主相机，跳过屏幕投点）");
+                }
+                return;
+            }
+            var w = Get(() => Screen.width, "Screen.width");
+            var h = Get(() => Screen.height, "Screen.height");
+            var amm = _seenAmm;
+            DumpScreenPosOf(amm, cam, w, h, _posOfficial, "official");
+            DumpScreenPosOf(amm, cam, w, h, _posTower, "tower");
+            _lastPosTrace = now;
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[SEL][pos]: " + e.Message); }
+    }
+
+    /// <summary>单台投点行：模型根 transform.position → 屏幕坐标；visible=z&gt;0 且 xy 在屏幕内。
+    /// 设备已移除（interop 读抛）=关窗停投（5 分钟窗针对在场设备）。</summary>
+    private static void DumpScreenPosOf(AgentModelManager amm, Camera cam, int w, int h, Furniture f, string tag)
+    {
+        try
+        {
+            if (f == null || amm == null) return;
+            var cfg = Get(() => f.AgentConfigId, "Furniture.AgentConfigId");
+            var m = ResolveModel(amm, f, out _);
+            if (m == null)
+            {
+                TracePosOnce(tag, "[SEL][pos] " + tag + " cfg=" + cfg + " model=NULL（对比轮后模型从缓存消失）");
+                return;
+            }
+            var obj = Get(() => m.Obj, "AgentModel.Obj");
+            if (obj == null) { TracePosOnce(tag, "[SEL][pos] " + tag + " cfg=" + cfg + " obj=NULL"); return; }
+            var pos = Get(() => obj.transform.position, "Transform.position");
+            var sp = Get(() => cam.WorldToScreenPoint(pos), "Camera.WorldToScreenPoint");
+            var visible = sp.z > 0f && sp.x >= 0f && sp.x <= w && sp.y >= 0f && sp.y <= h;
+            TracePosOnce(tag, "[SEL][pos] " + tag + " cfg=" + cfg
+                             + " screen=" + sp.x.ToString("0.#") + "," + sp.y.ToString("0.#")
+                             + " world=" + pos.x.ToString("0.##") + "," + pos.y.ToString("0.##") + "," + pos.z.ToString("0.##")
+                             + " visible=" + (visible ? "true" : "false"));
+        }
+        catch (Exception e)
+        {
+            // 设备被搬走/场景卸载（interop 读已毁对象）→ 5 分钟窗立即作废，只此一行
+            _posUntil = 0f;
+            EndlessGuardPlugin.Trace("[SEL][pos] " + tag + " 停投（设备不可读: " + e.GetType().Name + "）");
+        }
+    }
+
+    /// <summary>投点行去重（同 tag 同内容=相机没动，跳过）。</summary>
+    private static void TracePosOnce(string tag, string line)
+    {
+        if (_lastPosLine.TryGetValue(tag, out var prev) && prev == line) return;
+        _lastPosLine[tag] = line;
+        EndlessGuardPlugin.Trace(line);
+    }
+
+    /// <summary>模型根组件对比（增补）：根 GameObject 全组件类型名清单（缺失件=null）+ 一级子名清单
+    ///（超 24 个截断计数）——官方 prefab 自带而我方拼装根没有的组件在此现形。</summary>
+    private static void DumpRootShape(string tag, GameObject obj)
+    {
+        try
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var c in Get(() => obj.GetComponents<Component>(), "GameObject.GetComponents"))
+            {
+                if (sb.Length > 0) sb.Append(',');
+                sb.Append(c == null ? "null" : Get(() => c.GetIl2CppType().Name, "Component.GetIl2CppType"));
+            }
+            EndlessGuardPlugin.Trace("[SEL][cmp] " + tag + " rootComps=" + sb);
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[SEL][cmp] " + tag + " rootComps: " + e.Message); }
+        try
+        {
+            var sb = new System.Text.StringBuilder();
+            var n = Get(() => obj.transform.childCount, "Transform.childCount");
+            for (int i = 0; i < n; i++)
+            {
+                if (i >= 24) { sb.Append(",…+").Append(n - 24).Append(" more"); break; }
+                if (i > 0) sb.Append(',');
+                var c = Get(() => obj.transform.GetChild(i), "Transform.GetChild");
+                sb.Append(c != null ? Get(() => c.name, "Transform.name") : "null");
+            }
+            EndlessGuardPlugin.Trace("[SEL][cmp] " + tag + " children=" + sb);
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[SEL][cmp] " + tag + " children: " + e.Message); }
     }
 
     /// <summary>模型全部 Collider 的注册态对照（射线→模型映射逐个核对；含 enabled/trigger/isTrigger）。</summary>
