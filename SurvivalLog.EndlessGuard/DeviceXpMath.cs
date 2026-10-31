@@ -72,6 +72,13 @@ internal static class DeviceXpMath
     /// <summary>显示名等级后缀（派生行 Name/Name_Local 建行用）：baseName + " Lv.N"。</summary>
     internal static string WithLevelSuffix(string baseName, int level) => baseName + " Lv." + level;
 
+    /// <summary>巡检核对的期望行号（fixwave2 F1 回归修复）：账本等级本身就是真值——不经 cfg MaxLevel
+    /// 夹取（调低上限只封顶今后的升级，走 Award→LevelFromXp(maxLevel) 路径；已升级设备绝不因 cfg
+    /// 事后调整被换回低级行削血）。ledgerLv≤0 病态归一基础行；非名单/越级（&gt;5，脏账本防）=-1
+    ///（调用方跳过写，不猜低级行）。</summary>
+    internal static int ExpectedRowFor(int baseCfgId, int ledgerLv) =>
+        RowIdFor(baseCfgId, Math.Max(1, ledgerLv));
+
     /// <summary>累计经验→当前等级（Lv1 起；xp 达阈值即升；封顶 maxLevel）。</summary>
     internal static int LevelFromXp(int xp, int maxLevel, int[] thresholds)
     {

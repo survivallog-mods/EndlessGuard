@@ -195,13 +195,13 @@ internal static class DeviceXpRuntime
                     var baseCfg = DeviceXpMath.BaseCfgOf(f.AgentConfigId);
                     if (baseCfg == ArrowTowerCfgId) ArrowTowerFx.NoteTower(f.InstanceId);   // T8：FX 注册表喂养
                     var cellKey = CellKeyOf(f);
-                    var lv = 1;
-                    if (Store.TryGet(SlotKey, baseCfg, cellKey, out var e) && e != null && e.Lv > 1) lv = Math.Min(e.Lv, MaxLevel);
-                    var expected = DeviceXpMath.RowIdFor(baseCfg, lv);
-                    if (expected < 0 || f.AgentConfigId == expected) continue;   // 幂等：一致零写零 trace
+                    var ledgerLv = 1;
+                    if (Store.TryGet(SlotKey, baseCfg, cellKey, out var e) && e != null) ledgerLv = e.Lv;
+                    var expected = DeviceXpMath.ExpectedRowFor(baseCfg, ledgerLv);   // F1：账本=真值，不经 cfg MaxLevel 夹取（只封顶今后升级，不降已有等级）
+                    if (expected < 0 || f.AgentConfigId == expected) continue;   // 幂等：一致零写零 trace；脏账本（>5）=-1 同样跳过
                     f.AgentConfigId = expected;                                  // 补写=换行（官方值权威，无属性直写）
                     ReinitFromRow(f, expected, fullHeal: false);                 // 夹取不白送血（升级路径才满血）
-                    EndlessGuardPlugin.Trace("[XP] recal cfg=" + baseCfg + " lv=" + lv + " row=" + expected);
+                    EndlessGuardPlugin.Trace("[XP] recal cfg=" + baseCfg + " lv=" + ledgerLv + " row=" + expected);
                 }
                 catch (Exception e) { EndlessGuardPlugin.Trace("[XP] recal probe: " + e.Message); }
             }
@@ -214,13 +214,43 @@ internal static class DeviceXpRuntime
     /// AgentConfigId=BaseCfgOf(现场值) + OnInit(基础行) 重快照攻击面板 + 耐久 Initialize(min(cur,基础上限),
     /// 基础上限)（夹取不回血），并清空本槽账本+落盘。开启状态下每轮巡检都跑（幂等：已在基础行且耐久
     /// 合规=零写）；全部干净时只打一次 scan-clean 行。cfg 不自动复位——作者反复进出档确认满意后手动
-    /// 关回 false，然后可安全删除 dll（README 说明由控制方后续补，此处只留代码注释）。</summary>
+    /// 关回 false，然后可安全删除 dll（README 说明由控制方后续补，此处只留代码注释）。
+    /// F2 场景就绪门：主菜单（世界未建）与读档半程（agent 列表未灌）设备都不可见——此时清账本或打
+    /// 「可安全删 dll」绿灯都是假信号（作者据此删 dll，存档里设备仍挂派生行=损坏）。场景未就绪=整个
+    /// 还原流程挂起（账本一字节不动，零副作用），就绪后才执行；pending 行每次未就绪期只打一条。
+    /// 就绪口径照 BagTable.Cm()/ArrowTower 哨兵的「数据装载才动手」模式：单例已建 + GetAllAgent()
+    /// 可枚举非空（蕴涵 IsInstanceCreated，并封掉读档半程的列表空窗）。</summary>
     private static bool _resetCleanTraced;
+    private static bool _resetPendingTraced;
+
+    /// <summary>还原场景就绪探测（F2；照 BagTable.Cm()/ArrowTower 哨兵「数据装载才动手」模式）：
+    /// 世界单例已建且 AgentManager.GetAllAgent() 可枚举非空——防主菜单（世界未建）与读档半程
+    /// （列表未灌）两个空窗把「清账本+绿灯」打在设备还原之前。异常/不可达=false（下轮再试）。</summary>
+    private static bool AgentsListReady()
+    {
+        try
+        {
+            if (!GameCore.HotUpdate.BaseSingleton<BattleLogicWorld>.IsInstanceCreated) return false;
+            var all = GameCore.HotUpdate.BaseSingleton<BattleLogicWorld>.Instance?._AgentManager?.GetAllAgent();
+            return all != null && all.Count > 0;
+        }
+        catch { return false; }
+    }
 
     private static void ResetAllLevelsIfArmed()
     {
         var armed = EndlessGuardPlugin.ResetLevels != null && EndlessGuardPlugin.ResetLevels.Value;
-        if (!armed) { _resetCleanTraced = false; return; }
+        if (!armed) { _resetCleanTraced = false; _resetPendingTraced = false; return; }
+        if (!AgentsListReady())
+        {
+            if (!_resetPendingTraced)
+            {
+                _resetPendingTraced = true;
+                EndlessGuardPlugin.Trace("[XP] reset pending: 进档后执行 (slot=" + SlotKey + ")");
+            }
+            return;
+        }
+        _resetPendingTraced = false;
         var changed = 0;
         foreach (var f in DevicesInPlay())
         {
@@ -336,6 +366,8 @@ internal static class DeviceXpRuntime
     // =====================================================================
 
     /// <summary>经验入账（唯一写入口）：账本（按基础 id 键控）+1 → 跨级则 ApplyLevel（换配置行）→ trace。
+    /// ResetLevels 还原模式开启期间整体不入账（M2：cfg 描述「保持开启期间经验不累积」的落实——否则
+    /// 经验进账下轮即被 ClearSlot 清掉，还留「2s 窗口攒满阈值→满血升级→下轮夹回」的修复口）。
     /// 全程 try/catch，异常只 trace 不上抛（战斗热路径零炸点）。</summary>
     internal static void Award(Furniture furn, int amount)
     {
@@ -343,6 +375,7 @@ internal static class DeviceXpRuntime
         {
             if (furn == null || amount <= 0) return;
             if (!XpOn()) return;
+            if (EndlessGuardPlugin.ResetLevels != null && EndlessGuardPlugin.ResetLevels.Value) return;   // M2：还原模式零入账
             var baseCfg = DeviceXpMath.BaseCfgOf(furn.AgentConfigId);
             if (!DeviceXpMath.IsTrackedDevice(baseCfg)) return;
             var cellKey = CellKeyOf(furn);

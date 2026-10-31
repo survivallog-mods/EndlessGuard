@@ -41,6 +41,7 @@ internal static class DeviceXpHover
             if (!DeviceXpRuntime.XpOn()) return;   // Defense.XPEnabled=false=进度行也停
             if (EndlessGuardPlugin.ShowLevel != null && !EndlessGuardPlugin.ShowLevel.Value) return;   // Defense.ShowLevel=false=关进度行
             var owner = __instance.InstanceId;
+            if (LastTrace.Count > 512) LastTrace.Clear();   // M3：节流字典按实例累积——超阈值整体清零（代价=清后每设备多一条节流行；设备销毁/跨读档残留不堆积）
             var now = Environment.TickCount;
             if (LastTrace.TryGetValue(owner, out var last) && unchecked((uint)(now - last)) < TraceIntervalMs) return;
             if (!DeviceXpRuntime.TryGetLevelInfo(__instance, out var lv, out var xp, out var next)) return;   // 无账目=不打扰

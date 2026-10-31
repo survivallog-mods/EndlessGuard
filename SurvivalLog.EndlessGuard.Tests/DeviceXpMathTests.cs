@@ -232,6 +232,41 @@ public class DeviceXpMathTests
         Assert.Equal(36001, DeviceXpMath.RowIdFor(36001, -3));
     }
 
+    // ---- F1 回归（fixwave2 评审）：巡检核对取账本原值，cfg MaxLevel 调低不降级 ----
+
+    [Theory]
+    [InlineData(99005, 5, 99155)]    // 满级设备
+    [InlineData(36004, 5, 99145)]    // 电锯满级
+    [InlineData(36001, 3, 99113)]    // 沙包 Lv3
+    [InlineData(36002, 2, 99122)]    // 尖刺 Lv2
+    [InlineData(99005, 1, 99005)]    // Lv1=基础行
+    [InlineData(99005, 0, 99005)]    // 病态账本（≤0）归一基础行
+    [InlineData(99005, -2, 99005)]
+    public void ExpectedRowFor_ReconcileReadsLedgerVerbatim(int baseCfg, int ledgerLv, int expected)
+    {
+        Assert.Equal(expected, DeviceXpMath.ExpectedRowFor(baseCfg, ledgerLv));
+    }
+
+    [Fact]
+    public void ExpectedRowFor_LoweredCfgMaxLevel_NeverDowngradesLedgerLv5()
+    {
+        // F1 契约钉死：MaxLevel cfg 从 5 调到 3 时，账本 Lv5 设备的期望行仍是 Lv5 行——上限只封顶
+        // 今后的升级（Award→LevelFromXp(maxLevel) 路径）。旧实现 Min(5,3)=3 → 99152 → 换行+夹血降级
+        // 是回归缺陷；此处以"按上限 3 核对"的错误口径作反例对照。
+        var wrongClamped = DeviceXpMath.RowIdFor(99005, 3);   // 99153（旧缺陷口径 Min(5,3)=3 的产物）
+        Assert.Equal(99153, wrongClamped);
+        Assert.NotEqual(wrongClamped, DeviceXpMath.ExpectedRowFor(99005, 5));
+        Assert.Equal(99155, DeviceXpMath.ExpectedRowFor(99005, 5));
+    }
+
+    [Fact]
+    public void ExpectedRowFor_DirtyLedgerAboveCap_SkipsWrite()
+    {
+        // 脏账本（lv>5，正常路径不可产生——LevelFromXp 封顶）→ -1：调用方跳过写，绝不猜一个低级行
+        Assert.Equal(-1, DeviceXpMath.ExpectedRowFor(99005, 9));
+        Assert.Equal(-1, DeviceXpMath.ExpectedRowFor(36001, 6));
+    }
+
     [Fact]
     public void RowIdFor_RoundTripsThroughTrySplit()
     {
