@@ -22,6 +22,28 @@ namespace SurvivalLog.EndlessGuard;
 /// F1 快注入：存档家具实例化可早于表注入落地（旧门=ConfigManager 就绪 + 2s 步进），输掉竞态的会话里
 /// 设备以「无模型」态出生（官方 LoadGameObject(P_Tripo05) miss 返 null、我方 supply 尚未 armed）。
 /// FastInjectTicker（0.25s，EndlessGuardPlugin.cs）只跑表注入快路 TryInjectFast，首次全绿即退役。
+/// F2 失联模型自愈（CreateFurnitureShow 重建）——官方创作者参数逐位考证（dump.cs 2026-10-23_26157732）：
+/// - 方法=AgentModelManager.CreateFurnitureShow(long instanceId, int configId, long showInstanceId,
+///   Vector3 position, Quaternion rotation, InstanceIdType type, int floorId)（dump.cs:353453，私有实例
+///   方法=EnumNotify_Furniture.CreateFurnitureShow=1005（dump.cs:69469）的官方事件处理器——放家具
+///   show 模型的正路。同族辨析：CreateModelShow=EnumNotify_Show 2008（通用代理模型，dump.cs:70133）、
+///   CreateBagFurnitureShow=EnumNotify_Furniture 1004（包裹家具，dump.cs:69468）——均非本例。
+///   私有可直调：interop 代理全公开（本仓先例：OnSelectFurnitureShow/FireDevice 等私有成员已挂/已调）。
+/// - instanceId←Furniture.InstanceId（BaseEntity 公开，dump.cs:106044；cmp 实证=AgentModel.logicInstanceId）；
+///   configId←Furniture.AgentConfigId（BaseAgent 0x30 公开，dump.cs:374680）；
+///   showInstanceId←Furniture.ShowInstanceId（BaseAgent 0x38 公开，dump.cs:374683——TowerSelDiag cmp
+///   实证的 GetAgentModel 有效键）；
+///   position/rotation←TransformComponent.Position/.Rotation（public，dump.cs:373618/373619；
+///   逻辑位姿权威值，DeviceXpRuntime.CellKeyOf 同源）；type←InstanceIdType.Furniture=1
+///   （dump.cs:106129-106135：Default=0/Furniture=1/Item=2/Unit=3…）；
+///   floorId←ConfigManager.GetFloorGroup(Furniture.MapConfigId)（dump.cs:54502/375671，公开）——
+///   证据链：AgentModel.OnInit(…, int floorId=0, …)（dump.cs:352682）→AgentModel.FloorId（0xF8，
+///   dump.cs:352424，cmp 实机实证防御设备 floor=1）；楼层值域={1(1F),101(B1),102(2F)}
+///   （HotKeyManager 常量，dump.cs:362192-362194）；GetFloorGroup 取值即此组号，不可达/非正退 1（1F）。
+/// - 防双建门：三键（GetAgentModel(showId)/GetAgentModel(instId)/GetAgentModelByLogicInstanceId(instId)）
+///   任一解析到活模型（Obj 非 null 可读）即不碰——「存在但隐藏」态 Obj 活=跳过，故不会对隐藏模型重复
+///   CreateFurnitureShow、无 RefreshCollider 双注册 collider（brief CAUTION）；上限 3 次/台/会话
+///   （Dictionary&lt;long,int&gt;，读档/换档清零），give-up 每台一次。
 /// interop 属性名经 mdump 实测（E:\SteamLibrary\...\BepInEx\interop\HotUpdate.dll，2026-10-30，
 /// 实测命令：mdump.exe HotUpdate.dll "Config_TowerDevice,Config_Furniture,Config_Item,Config_ProductionList,Config_DefenseLv,ConfigManager"）：
 /// - Config_TowerDevice：ID/AttackPriority/MaxAttackers/IsWalkThrough/ExclusiveCharacter/Attack/
@@ -64,11 +86,12 @@ internal static class ArrowTower
     /// Cm() 单例未建→下轮再试；五张 dict 任一未装载→下轮再试；哨兵齐→稳态静默返回）。
     /// fixwave2：派生等级行（99112..99155）随四表一起注入/哨兵重放；另有成长 cfg 新鲜度哨兵——
     /// 步长/系数类 cfg 改值后重建派生行内容（组件面板在下次官方重初始化时吸收新值）。
-    /// fixwave5：表工作抽为 EnsureTables 共享核（F1 快注入同一条路）。</summary>
+    /// fixwave5：表工作抽为 EnsureTables 共享核（F1 快注入同一条路）；稳态轮追加 F2 失联模型自愈。</summary>
     internal static void OnStep()
     {
         if (!EnsureTables()) return;          // 表未就绪/本轮注入后仍未全绿（如 Lv4 行漂移）→ 下轮再试
         ArrowTowerFx.EnsureStarted();         // 表稳态懒建动画/弹道 ticker（门=ArrowTowerEnabled，裁决见 ArrowTowerFx 类头；T8）
+        HealModellessDevices();               // fixwave5 F2：无模型设备官方创作者重建（防双建门内）
     }
 
     /// <summary>fixwave5 F1 快注入快路（FastInjectTicker 0.25s 消费）：只做表注入/哨兵这一件事，
@@ -117,6 +140,169 @@ internal static class ArrowTower
         bool lv4Missing = !dl.TryGetValue(DefenseLvKey, out var lv4) || lv4 == null || !Contains(lv4.unlock_recipes, Id);
         bool xpStale = !rowsMissing && !derivedMissing && !legacyNeedsSync && DerivedRowsStale();
         return !rowsMissing && !derivedMissing && !legacyNeedsSync && !lv4Missing && !xpStale;
+    }
+
+    // =====================================================================
+    // fixwave5 F2：失联模型自愈（race 幸存者链——官方 CreateFurnitureShow 重建，参数考证见类头）
+    // =====================================================================
+
+    /// <summary>每台家具实例的已用自愈尝试数（键=Furniture.InstanceId；读档/换档=slot 变更即清零——
+    /// 新场景的实例是新的 show，旧计数作废）。</summary>
+    private static readonly System.Collections.Generic.Dictionary<long, int> HealAttempts = new System.Collections.Generic.Dictionary<long, int>();
+
+    /// <summary>已打过 give-up 行的实例（每台一次，防刷屏；同随 slot 变更清零）。</summary>
+    private static readonly System.Collections.Generic.HashSet<long> HealGaveUp = new System.Collections.Generic.HashSet<long>();
+
+    private static string _healSlot;
+
+    /// <summary>无模型设备自愈（2s 稳态轮尾执行）：逐台受追踪设备（官方 36001-36004+我方 99005/991xx
+    /// ——race 同样可能搁浅派生行设备）三键试解 AgentModel，全 miss 且 Obj 无活体才调官方
+    /// CreateFurnitureShow 重建（参数映射逐位考证见类头）。稳态成本=每台 2~3 次字典查。全程 try/catch
+    /// 单台隔离；零存档写入（show 层纯进程内存态）。</summary>
+    private static void HealModellessDevices()
+    {
+        try
+        {
+            var slot = DeviceXpRuntime.SlotKey;
+            if (_healSlot == null) _healSlot = slot;
+            else if (!string.Equals(_healSlot, slot, StringComparison.Ordinal))
+            {
+                _healSlot = slot;                       // 读档/换档：尝试计数与 give-up 名单作废（brief 口径）
+                HealAttempts.Clear();
+                HealGaveUp.Clear();
+            }
+
+            var amm = LiveModelManager();
+            if (amm == null) return;                    // 主菜单/场景切换空窗：静默下轮
+            foreach (var f in TrackedDevicesInPlay())
+            {
+                try
+                {
+                    if (HasLiveModel(amm, f)) continue;   // 模型在（含存在但隐藏）→ 不碰（防双建/双 collider 注册）
+                    var id = f.InstanceId;
+                    if (!HealAttempts.TryGetValue(id, out var n)) n = 0;
+                    if (n >= MaxHealAttemptsPerInstance)
+                    {
+                        if (HealGaveUp.Add(id))
+                            EndlessGuardPlugin.Trace("[Tower] model heal gave up cfg=" + f.AgentConfigId
+                                                     + " showId=" + f.ShowInstanceId);
+                        continue;
+                    }
+                    n++;
+                    HealAttempts[id] = n;
+                    CreateFurnitureShowVia(amm, f);
+                    EndlessGuardPlugin.Trace("[Tower] model healed cfg=" + f.AgentConfigId + " attempt=" + n);
+                }
+                catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] heal probe: " + e.Message); }
+            }
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] heal: " + e.Message); }
+    }
+
+    private const int MaxHealAttemptsPerInstance = 3;
+
+    /// <summary>show 模型管理器可达性（TowerSelDiag.LiveAmm 同款访问路径：BattleShowWorld 单例 →
+    /// _AgentModelManager；不可达=null 不抛）。</summary>
+    private static GameCore.HotUpdate.Battle.Show.AgentModelManager LiveModelManager()
+    {
+        try
+        {
+            if (!GameCore.HotUpdate.BaseSingleton<GameCore.HotUpdate.Battle.Show.BattleShowWorld>.IsInstanceCreated) return null;
+            return GameCore.HotUpdate.BaseSingleton<GameCore.HotUpdate.Battle.Show.BattleShowWorld>.Instance?._AgentModelManager;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>在场受追踪设备枚举（DeviceXpRuntime.DevicesInPlay 同款口径：GetAllAgent → 滤 IsDead →
+    /// TryCast&lt;Furniture&gt; → IsTrackedDevice 含派生行；单代理病态跳过不拖垮整轮）。</summary>
+    private static System.Collections.Generic.IEnumerable<GameCore.HotUpdate.Battle.Logic.Furniture> TrackedDevicesInPlay()
+    {
+        if (!GameCore.HotUpdate.BaseSingleton<GameCore.HotUpdate.Battle.Logic.BattleLogicWorld>.IsInstanceCreated) yield break;
+        Il2CppSystem.Collections.Generic.List<GameCore.HotUpdate.Battle.Logic.BaseAgent> all = null;
+        try { all = GameCore.HotUpdate.BaseSingleton<GameCore.HotUpdate.Battle.Logic.BattleLogicWorld>.Instance?._AgentManager?.GetAllAgent(); }
+        catch { yield break; }
+        if (all == null) yield break;
+        for (int i = 0; i < all.Count; i++)
+        {
+            GameCore.HotUpdate.Battle.Logic.Furniture f = null;
+            try
+            {
+                var a = all[i];
+                if (a == null || a.IsDead) continue;
+                f = a.TryCast<GameCore.HotUpdate.Battle.Logic.Furniture>();
+                if (f == null || !DeviceXpMath.IsTrackedDevice(f.AgentConfigId)) continue;
+            }
+            catch { continue; }
+            yield return f;
+        }
+    }
+
+    /// <summary>模型在册判定（防双建门，brief CAUTION 落点）：三键只读试解——showId（TowerSelDiag cmp
+    /// 实证的官方注册键）→ instId → logicId；任一键解析到「Obj 活体」=健康（存在但隐藏也是活体）→
+    /// 不重建。身份不可读/模型壳不可读=保守视为在册不碰（宁漏勿炸、宁漏勿双建）。</summary>
+    private static bool HasLiveModel(GameCore.HotUpdate.Battle.Show.AgentModelManager amm, GameCore.HotUpdate.Battle.Logic.Furniture f)
+    {
+        long showId, instId;
+        try { showId = f.ShowInstanceId; instId = f.InstanceId; }
+        catch { return true; }
+        GameCore.HotUpdate.Battle.Show.AgentModel m = null;
+        try { m = amm.GetAgentModel(showId); } catch { }
+        if (m == null) try { m = amm.GetAgentModel(instId); } catch { }
+        if (m == null) try { m = amm.GetAgentModelByLogicInstanceId(instId); } catch { }
+        if (m == null) return false;
+        UnityEngine.GameObject obj = null;
+        try { obj = m.Obj; } catch { return true; }
+        return ObjAlive(obj);
+    }
+
+    /// <summary>Unity 对象活体判定：interop 引用非 null 且可读名（已毁对象读属性会抛/返空——双保险）。</summary>
+    private static bool ObjAlive(UnityEngine.GameObject o)
+    {
+        if (o == null) return false;
+        try { var _ = o.name; return true; }
+        catch { return false; }
+    }
+
+    /// <summary>官方创作者重建调用（类头「F2」参数逐位考证；TransformComponent 不可达=本轮放弃该台，
+    /// 不猜位姿——错位重建比不重建更糟）。floorId=GetFloorGroup(MapConfigId)，非正退 1（1F）。</summary>
+    private static void CreateFurnitureShowVia(GameCore.HotUpdate.Battle.Show.AgentModelManager amm, GameCore.HotUpdate.Battle.Logic.Furniture f)
+    {
+        var tc = TransformComponentOf(f);
+        if (tc == null) throw new InvalidOperationException("TransformComponent unreachable (no position source; skip heal)");
+        var pos = tc.Position;
+        var rot = tc.Rotation;
+        amm.CreateFurnitureShow(f.InstanceId, f.AgentConfigId, f.ShowInstanceId, pos, rot,
+            GameCore.HotUpdate.InstanceIdType.Furniture, ResolveFloorId(f));
+    }
+
+    /// <summary>show 楼层：ConfigManager.GetFloorGroup(MapConfigId)（dump.cs:54502/375671；值域
+    /// 1/101/102=HotKeyManager 常量 dump.cs:362192-362194），不可达/非正退 1（cmp 实证防御设备 floor=1）。</summary>
+    private static int ResolveFloorId(GameCore.HotUpdate.Battle.Logic.Furniture f)
+    {
+        try
+        {
+            if (GameCore.HotUpdate.BaseSingleton<GameCore.HotUpdate.ConfigManager>.IsInstanceCreated)
+            {
+                var floor = GameCore.HotUpdate.BaseSingleton<GameCore.HotUpdate.ConfigManager>.Instance?.GetFloorGroup(f.MapConfigId) ?? 0;
+                if (floor > 0) return floor;
+            }
+        }
+        catch { }
+        return 1;
+    }
+
+    /// <summary>受追踪家具的 TransformComponent（组件按 Type 索引直达，ArrowTowerModel.TransformOf
+    /// 已验证模式；不可达=null）。</summary>
+    private static GameCore.HotUpdate.Battle.Logic.TransformComponent TransformComponentOf(GameCore.HotUpdate.Battle.Logic.Furniture f)
+    {
+        try
+        {
+            var dict = f != null ? f.agentComponentDictionary : null;
+            if (dict == null) return null;
+            return dict.TryGetValue(Il2CppInterop.Runtime.Il2CppType.From(typeof(GameCore.HotUpdate.Battle.Logic.TransformComponent)), out var raw)
+                ? raw?.TryCast<GameCore.HotUpdate.Battle.Logic.TransformComponent>() : null;
+        }
+        catch { return null; }
     }
 
     /// <summary>F1/F6 旧版建行探测（行在我方 99005 上，只有本 mod 会建此 id）：①家具行
