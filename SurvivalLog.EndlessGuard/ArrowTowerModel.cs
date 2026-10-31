@@ -5,6 +5,8 @@ using GameCore.HotUpdate;                 // Furniture / BaseSingleton（F2 场�
 using GameCore.HotUpdate.Battle.Logic;    // BattleLogicWorld / TransformComponent（F2）
 using HarmonyLib;
 using Il2CppInterop.Runtime;
+using GameCore.Scripts;                   // fixwave6：ShowState/ModelAnimator/StateChild/SpecChild（官方根契约类型）
+using UnityEngine.AI;                     // fixwave6：NavMeshObstacle
 using UnityEngine;
 using Object = UnityEngine.Object;
 
@@ -32,6 +34,16 @@ namespace SurvivalLog.EndlessGuard;
 ///（Furniture_TowerDeviceStateCheck：STATE01_PERCENT=0.7 / STATE02_PERCENT=0.3；死亡=StateBroken；
 /// 供电外观另走 SyncTowerDeviceModelState(bool)，dump.cs:376481）。布局-防御选取/悬停名/耐久 FSM
 /// 通路依赖此契约（wave3 实证 Collider 已注册而不可选中=缺状态组）。
+/// fixwave6（根因修复，2026-10-31 live dump 定案）：官方设备模型根 = Transform,BoxCollider,
+/// NavMeshObstacle,ModelAnimator,ShowState + 子 State04/FX_BladeTrap/CenterPoint/HeadBar/FX_State03/
+/// State01/02/03/StateBroken；我方根只有 Transform,BoxCollider + 状态组——TowerDevice 耐久 FSM 驱动件
+///（AgentModel.ModelState/Animator，dump.cs:352394/352392）与悬停头栏世界锚（ModelAnimator.HeadBar/
+/// CenterPoint 字段，dump.cs:1333608）全缺 = 不可选/无悬停的根因。镜像补齐：根上 AddComponent
+/// ShowState/ModelAnimator/NavMeshObstacle + 空锚子节点 HeadBar(y≈2.1)/CenterPoint(y≈0.95) +
+/// State04 克隆组（GameKey.State04 常量在 dump.cs:57781 而 TowerDeviceStateCheck 仅三档——契约形
+/// 补齐防按名切换落空）；ShowState/ModelAnimator 默认 ctor=共享空桩（RVA 0x60BF70）字段全 null →
+/// 补非空空表防官方侧遍历 NRE。EnsureModelContract 幂等（模板建一次克隆继承 + 每次供给核验，
+/// Instantiate 原生重映射 HeadBar/CenterPoint/Renderers 引用）。详见 EnsureModelContract 方法注。
 ///
 /// ══ Spike 结论（2026-10-31，对 10-29 现行 build 实测：Il2CppDumper 重跑现行 GameAssembly.dll +
 /// global-metadata.dat 得现行 script.json，Iced（suite/tools/disasm_tool）全链逐条核读）══
@@ -93,6 +105,7 @@ internal static class ArrowTowerModel
     private static readonly Dictionary<(Color, TowerTextures.Role), Material> Mats = new();
     private static bool _built, _armed, _failTraced, _suppliedTraced;
     private static int _supplyTraced;                    // F3：前 3 次 supply 的缩放/高度自证计数
+    private static string _templateContract = "n/a";     // fixwave6：模板根契约摘要（进 prefab-built trace）
 
     private const float TargetHeight = 1.9f;             // F3：设计总高（spec §4.3），±15% 外才校正
 
@@ -116,9 +129,10 @@ internal static class ArrowTowerModel
             var via = VerifyPatches()
                 ? "Harmony postfix LoadGameObject×3(miss→supply, __result ref 已核验)"
                 : "POSTFIX 未在挂/回写核验失败（interop 漂移？）——实机将显示官方兜底盒";
-            EndlessGuardPlugin.Trace("[Tower] model prefab built (states=4 State01/02/03/Broken"
+            EndlessGuardPlugin.Trace("[Tower] model prefab built (states=5 State01/02/03/04/Broken"
                                      + ", parts=" + CountDescendants(Template.transform)
                                      + ", collider=Box(0.9,1.9,0.9)@y0.95"
+                                     + ", contract=" + _templateContract
                                      + ", via=" + via + ")");
         }
         catch (Exception e)
@@ -272,6 +286,7 @@ internal static class ArrowTowerModel
             if (inst == null) return fallback;
             inst.SetActive(true);                                            // 镜像官方命中路径（SetActive(true)）
             EnsureSelectableCollider(inst);                                  // fixwave2：选择碰撞体兜底（正常=零写）
+            var contract = EnsureModelContract(inst, out var contractAdded); // fixwave6：官方根契约核验
             MirrorSelectableStructure(inst);                                 // fixwave3 W3A：全链镜像官方层（选取射线层掩码，见方法注）
             TowerModelDiag.NoteSuppliedTower(inst.transform);                // fixwave3 W3A：登记实例供一次性取证 dump
             if (root != null)
@@ -297,6 +312,15 @@ internal static class ArrowTowerModel
                                          + " rendererH=" + RendererHeight(inst).ToString("0.00")
                                          + " meshH=" + MeshHeight(inst).ToString("0.00")
                                          + " (目标≈" + TargetHeight.ToString("0.0") + ")");
+            }
+            if (!_contractTraced)                  // fixwave6：会话首供给一次性完整契约自证
+            {
+                _contractTraced = true;
+                EndlessGuardPlugin.Trace("[Tower] contract attach: " + contract);
+            }
+            else if (contractAdded)                // 修复路径（克隆体缺件被补回）单独可见
+            {
+                EndlessGuardPlugin.Trace("[Tower] contract re-attached on supplied instance: " + contract);
             }
             return inst;
         }
@@ -457,11 +481,13 @@ internal static class ArrowTowerModel
     /// Furniture_TowerDeviceStateCheck（TypeDefIndex 6383）常量 STATE01_PERCENT=0.7、STATE02_PERCENT=0.3、
     /// args.LastStateKey(string)——按耐久百分比换态：&gt;70%=State01（完好）、30~70%=State02、≤30%=State03
     ///（重损）；死亡=StateBroken 残骸；供电外观另走 Furniture.SyncTowerDeviceModelState(bool powered)
-    ///（dump.cs:376481）。布局-防御选取/悬停名/耐久通路依赖此状态组契约（wave3 实证：Collider 已注册
-    /// modelCfg=99153 而仍不可选中=缺状态组）。我方结构：State01/Mesh/G_Tripo05A=全量塔身（弩机「Head」、
-    /// 旗「Flag」在内）；State02/Mesh/G_Tripo05B、State03/Mesh/G_Tripo05C=全量静态克隆（Head 不参与动画
-    /// ——控制方裁定）；StateBroken/Mesh/G_Tripo05D=残骸堆。仅 State01 激活（FSM 按名切换开闭）。
-    /// 性能注：3 份全量克隆 ≈280 对象/塔——少数塔可承受；未来 LOD/共享化候选（裁定留档）。
+///（dump.cs:376481）。布局-防御选取/悬停名/耐久通路依赖此状态组契约（wave3 实证：Collider 已注册
+/// modelCfg=99153 而仍不可选中=缺状态组）。我方结构：State01/Mesh/G_Tripo05A=全量塔身（弩机「Head」、
+/// 旗「Flag」在内）；State02/Mesh/G_Tripo05B、State03/Mesh/G_Tripo05C、State04/Mesh/G_Tripo05E
+///（fixwave6）=全量静态克隆（Head 不参与动画——控制方裁定）；StateBroken/Mesh/G_Tripo05D=残骸堆。
+/// 仅 State01 激活（FSM 按名切换开闭）。
+/// 性能注：4 份全量克隆 ≈370 对象/塔（fixwave6 加 State04 组）——少数塔可承受；未来 LOD/共享化候选
+///（裁定留档）。
     /// W3B 贴图角色不变（克隆共享同一批缓存材质；Retint 按 Transform 递归，失活组同样覆盖）。</summary>
     private static void BuildTemplate()
     {
@@ -486,6 +512,12 @@ internal static class ArrowTowerModel
         if (c != null) c.SetParent(cMesh, false);
         s3.gameObject.SetActive(false);
 
+        var s4 = NewStateGroup(t, "State04");            // fixwave6：第 4 档外观组（官方 GameKey.State04
+        var e4Mesh = NewStateMesh(s4, "G_Tripo05E");     // 常量在 dump.cs:57781 而 TowerDeviceStateCheck
+        var e4 = CloneTower(a, "G_Tripo05E");            // 仅三档——未见切换但契约形补齐，防通用状态链按名
+        if (e4 != null) e4.SetParent(e4Mesh, false);     // 切换落空塔隐形；默认失活零渲染开销）
+        s4.gameObject.SetActive(false);
+
         var sB = NewStateGroup(t, "StateBroken");        // 死亡残骸（简堆，总高 ≈0.3）
         var dMesh = NewStateMesh(sB, "G_Tripo05D");
         BuildDebris(dMesh);
@@ -494,10 +526,21 @@ internal static class ArrowTowerModel
         // ── 选择碰撞体（fixwave2 起在根上；wave3 diag-reg 实证 AgentModel 收编根 Collider=注册链闭合，
         // wave4 补状态组=选取/悬停 FSM 通路闭合）：罩住塔身（占地 1×1=一格，高 1.9；旗杆/顶饰球略超出
         // 不计入）。子物件图元的 Collider 仍在 Box/Ball/Pyramid 里逐个拆除（防 FSM 相争旧裁定只针对
-        // 散件碰撞体；根上这一个罩体=官方同款可选中形态）。
+        // 散件碰撞体；根上这一个罩体=官方设备模型的同款形态）。
         var col = Template.AddComponent<BoxCollider>();
         col.size = new Vector3(0.9f, 1.9f, 0.9f);
         col.center = new Vector3(0f, 0.95f, 0f);
+
+        // ── 官方根契约补齐（fixwave6）：ShowState/ModelAnimator/NavMeshObstacle + HeadBar/CenterPoint
+        // 锚点——挂在模板根上，Clone 时 Instantiate 原生序列化重映射组件内引用（HeadBar/CenterPoint/
+        // Renderers 指向克隆体自己的节点）。幂等（见 EnsureModelContract）；模板路径失败随 EnsureRegistered
+        // 下次供给重试。返回串仅诊断用（模板期不单独 trace，实例首供给统一打）。
+        try { _templateContract = EnsureModelContract(Template, out _); }
+        catch (Exception e)
+        {
+            _templateContract = "fail:" + e.Message;
+            EndlessGuardPlugin.Trace("[Tower] template contract: " + e.Message);
+        }
     }
 
     /// <summary>根直下状态组节点 StateXX（官方 FSM SetModelState/按名开闭契约，dump.cs 字面量）。</summary>
@@ -742,6 +785,160 @@ internal static class ArrowTowerModel
             var c = t.GetChild(i);
             if (c != null) SetLayerRecursive(c, layer);
         }
+    }
+
+    // ══════════════ fixwave6：官方模型根契约补齐（ShowState/ModelAnimator/NavMeshObstacle/锚点）══════════════
+    //
+    // 根因（2026-10-31 live dump 定案）：官方设备模型根组件 = Transform,BoxCollider,NavMeshObstacle,
+    // ModelAnimator,ShowState，children = State04,FX_BladeTrap,CenterPoint,HeadBar,FX_State03,
+    // State01,State02,State03,StateBroken；我方供给根只有 Transform,BoxCollider + State01/02/03/Broken。
+    // TowerDevice 耐久 FSM 驱动件（AgentModel.ModelState=ShowState / AgentModel.Animator=ModelAnimator，
+    // dump.cs:352394/352392）与悬停头栏世界锚（ModelAnimator.HeadBar/CenterPoint 字段，dump.cs:1333608）
+    // 全缺 ⇒ 不可选中 + 无悬停信息。逐件 dump.cs 考证：
+    // • ModelAnimator（GameCore.Scripts，dump.cs:1333608）：MonoBehaviour，字段 HeadBar/CenterPoint/
+    //   FlashLight(GameObject)、AnimatorPlayer(Animator)、Renderers/Skinneds(List)。默认 .ctor 与
+    //   ShowState 等同类=共享空桩（RVA 0x60BF70）⇒ AddComponent 后字段全 null：引用字段必须回填
+    //   （HeadBar/CenterPoint 指锚点；Renderers 填本塔激活 renderer 清单，Skinneds 补非空空表）——
+    //   否则官方侧遍历/取锚即 NRE。AnimatorPlayer/FlashLight 留空（我方程序化网格无 Animator/闪光件，
+    //   官方 WaitModelStateOnce 有 30s fallback（dump.cs:352507）兜底）——部分契约也是进步，trace 记缺口。
+    // • ShowState（GameCore.Scripts，dump.cs:1333856）：MonoBehaviour，States(List<StateChild>)/
+    //   SpecChilds(List<SpecChild>)，公开 ChangeState(string)/OpenTag(string,bool)。链路：耐久 FSM
+    //   Furniture_TowerDeviceStateCheck（dump.cs:414763）→ AgentModel.SetModelState(stateKey)
+    //  （dump.cs:352694）→ AgentModel.ModelState 驱动。本轮只补组件+非空空表：StateChild 条目
+    //   （Key/Open_GameObjects/Close_GameObjects 映射）是官方预制体内的序列化数据、方法体不可见，
+    //   语义未证不猜（下一轮实机 lever，见 fixwave5 报告 wave6 节）——空表 ChangeState 落空=无伤，
+    //   null 表=官方侧 NRE，两害取其轻。
+    // • NavMeshObstacle（UnityEngine.AI，dump.cs:1460540，sealed Behaviour）：官方根同款原生组件；
+    //   运行时开合由 AgentModel.ApplyTowerDeviceNavObstacle（dump.cs:2EF8F80）/
+    //   OnTowerDeviceBlockingChanged（dump.cs:2F02870）接管——我方只按根 BoxCollider 同 footprint
+    //   预配置（Box 0.9×1.9×0.9 @y0.95，carving=false 不抢官方语义）。
+    // • HeadBar/CenterPoint 锚点：空 GameObject。HeadBar y≈2.1（塔顶上方——悬停名/血条的世界投影源；
+    //   UI_FurnitureHeadBar_Vm（dump.cs:241331）的 Obj_Hp/Text_Name 全是 UI prefab 侧子件，世界侧
+    //   只需锚 Transform，无「HeadBar 之下还要子节点」的证据——按 brief「anchors first」不过度搭建）；
+    //   CenterPoint y≈0.95（塔身中心，与根罩体中心同高）。
+    // 幂等：全部走 GetComponent 存在检查/锚点名查找；模板建成时挂一次（Clone 继承，Instantiate 原生
+    // 序列化重映射组件内引用到克隆体自己的节点），每次供给再核验一遍（修复=补一行 trace；重染路径
+    // EnsureGoodMaterial 只动 sharedMaterial，与组件无关，天然不重复）。
+
+    /// <summary>锚点高度（HeadBar=塔顶上方 y≈2.1；CenterPoint=塔身中心 y≈0.95，brief 定值）。</summary>
+    private const float HeadBarAnchorY = 2.1f;
+    private const float CenterPointAnchorY = 0.95f;
+
+    /// <summary>会话首供给一次性完整契约 trace（与 _suppliedTraced 同款防刷屏纪律）。</summary>
+    private static bool _contractTraced;
+
+    /// <summary>确保 root 具备官方模型根契约（组件+锚点），幂等；返回摘要串
+    /// "ShowState=… ModelAnimator=… NavMeshObstacle=… HeadBar/CenterPoint=…"（每件 ok / ok(缺口) /
+    /// fail:原因）。added=true=本次实际补了组件/锚点（修复路径，trace 用）。单件隔离：一件 fail 不拖垮
+    /// 其余（部分契约也是进步）。调用点=①BuildTemplate 尾（模板根，克隆继承）②SupplyCore 每次供给。</summary>
+    internal static string EnsureModelContract(GameObject root, out bool added)
+    {
+        added = false;
+        if (root == null)
+            return "ShowState=fail:null ModelAnimator=fail:null NavMeshObstacle=fail:null HeadBar/CenterPoint=fail:null";
+
+        string ss, ma, nmo, anch;
+        bool a1, a2, a3, a4;
+        try { ss = EnsureShowState(root, out a1); } catch (Exception e) { ss = "fail:" + e.Message; a1 = false; }
+        try { anch = EnsureAnchors(root, out a4); } catch (Exception e) { anch = "fail:" + e.Message; a4 = false; }
+        try { ma = EnsureModelAnimator(root, out a2); } catch (Exception e) { ma = "fail:" + e.Message; a2 = false; }
+        try { nmo = EnsureNavObstacle(root, out a3); } catch (Exception e) { nmo = "fail:" + e.Message; a3 = false; }
+        added = a1 || a2 || a3 || a4;
+        return "ShowState=" + ss + " ModelAnimator=" + ma + " NavMeshObstacle=" + nmo
+             + " HeadBar/CenterPoint=" + anch;
+    }
+
+    /// <summary>ShowState：缺则 AddComponent（interop AddComponent(Type)，原生类型即建即活）；
+    /// 空桩 ctor 不建表 ⇒ States/SpecChilds 补非空空表（null 表会让官方 ChangeState 遍历 NRE）。</summary>
+    private static string EnsureShowState(GameObject root, out bool added)
+    {
+        added = false;
+        var t = Il2CppType.Of<ShowState>();
+        var comp = root.GetComponent(t)?.TryCast<ShowState>();
+        if (comp == null)
+        {
+            comp = root.AddComponent(t).TryCast<ShowState>();
+            added = true;
+        }
+        if (comp.States == null)
+            comp.States = new Il2CppSystem.Collections.Generic.List<StateChild>();   // 空表：ChangeState 落空=无伤
+        if (comp.SpecChilds == null)
+            comp.SpecChilds = new Il2CppSystem.Collections.Generic.List<SpecChild>();
+        return "ok";
+    }
+
+    /// <summary>ModelAnimator：缺则 AddComponent；回填 HeadBar/CenterPoint 锚引用 + Renderers 激活清单
+    ///（State01 组，Instantiate 克隆时原生重映射到克隆体节点）+ Skinneds 非空空表。
+    /// AnimatorPlayer/FlashLight 无源可填（程序化网格无 Animator/闪光件）——缺口入 trace（partial）。</summary>
+    private static string EnsureModelAnimator(GameObject root, out bool added)
+    {
+        added = false;
+        var t = Il2CppType.Of<ModelAnimator>();
+        var comp = root.GetComponent(t)?.TryCast<ModelAnimator>();
+        if (comp == null)
+        {
+            comp = root.AddComponent(t).TryCast<ModelAnimator>();
+            added = true;
+        }
+        if (comp.HeadBar == null)
+            comp.HeadBar = CreateOrFindAnchor(root, "HeadBar", HeadBarAnchorY);
+        if (comp.CenterPoint == null)
+            comp.CenterPoint = CreateOrFindAnchor(root, "CenterPoint", CenterPointAnchorY);
+        if (comp.Renderers == null)
+        {
+            var list = new Il2CppSystem.Collections.Generic.List<MeshRenderer>();
+            foreach (var r in root.GetComponentsInChildren<MeshRenderer>())
+                if (r != null) list.Add(r);
+            comp.Renderers = list;
+        }
+        if (comp.Skinneds == null)
+            comp.Skinneds = new Il2CppSystem.Collections.Generic.List<SkinnedMeshRenderer>();
+        return "ok(AnimatorPlayer=null)";            // 部分契约明示：官方动画链对我方模型无源，fallback 兜底
+    }
+
+    /// <summary>NavMeshObstacle：缺则 AddComponent 并按根罩体同 footprint 预配置（Box 0.9×1.9×0.9@y0.95、
+    /// carving=false）；已在=零写（运行时开合归官方 ApplyTowerDeviceNavObstacle）。</summary>
+    private static string EnsureNavObstacle(GameObject root, out bool added)
+    {
+        added = false;
+        var t = Il2CppType.Of<NavMeshObstacle>();
+        var comp = root.GetComponent(t)?.TryCast<NavMeshObstacle>();
+        if (comp != null) return "ok";
+        comp = root.AddComponent(t).TryCast<NavMeshObstacle>();
+        added = true;
+        comp.shape = NavMeshObstacleShape.Box;
+        comp.size = new Vector3(0.9f, 1.9f, 0.9f);
+        comp.center = new Vector3(0f, CenterPointAnchorY, 0f);
+        comp.carving = false;
+        return "ok";
+    }
+
+    /// <summary>锚点子节点：按名查（幂等），缺则建空 GO 摆到位（HeadBar y≈2.1 / CenterPoint y≈0.95）。</summary>
+    private static string EnsureAnchors(GameObject root, out bool added)
+    {
+        added = false;
+        var head = CreateOrFindAnchor(root, "HeadBar", HeadBarAnchorY, ref added);
+        var center = CreateOrFindAnchor(root, "CenterPoint", CenterPointAnchorY, ref added);
+        return head != null && center != null ? "ok" : "fail:anchor-null";
+    }
+
+    /// <summary>按名找锚点，缺则新建空 GO（localPos=(0,y,0)）。新建时把 added 置 true（修复路径 trace 用）。
+    /// 无 ref 重载供 ModelAnimator 回填引用时复用（彼时 added 语义归组件本身）。</summary>
+    private static GameObject CreateOrFindAnchor(GameObject root, string name, float y, ref bool added)
+    {
+        var tr = root.transform.Find(name);
+        if (tr != null) return tr.gameObject;
+        var go = new GameObject(name);
+        go.transform.SetParent(root.transform, false);
+        go.transform.localPosition = new Vector3(0f, y, 0f);
+        added = true;
+        return go;
+    }
+
+    private static GameObject CreateOrFindAnchor(GameObject root, string name, float y)
+    {
+        var dummy = false;
+        return CreateOrFindAnchor(root, name, y, ref dummy);
     }
 
     // ── 图元/网格小工具 ────────────────────────────────────────────────────────────

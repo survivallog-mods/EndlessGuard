@@ -58,6 +58,15 @@
       <HintPath>E:\SteamLibrary\steamapps\common\Survival Log\BepInEx\interop\UnityEngine.PhysicsModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.AIModule">
+      <HintPath>E:\SteamLibrary\steamapps\common\Survival Log\BepInEx\interop\UnityEngine.AIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- fixwave6：官方模型根契约类型（ShowState/ModelAnimator/StateChild/SpecChild，GameCore.Scripts）在 AOT 互操作集 -->
+    <Reference Include="AOT">
+      <HintPath>E:\SteamLibrary\steamapps\common\Survival Log\BepInEx\interop\AOT.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="0Harmony">
       <HintPath>E:/SteamLibrary/steamapps/common/Survival Log/BepInEx/core/0Harmony.dll</HintPath>
       <Private>false</Private>
