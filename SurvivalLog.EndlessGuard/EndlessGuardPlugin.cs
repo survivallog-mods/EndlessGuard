@@ -83,6 +83,14 @@ public sealed class EndlessGuardPlugin : BasePlugin
         Object.DontDestroyOnLoad(go);
         go.AddComponent<GuardTicker>();
 
+        // fixwave5 F1 快注入 ticker（0.25s，表注入竞态根治——独立 GameObject：退役 SetActive(false)
+        // 不连坐 2s 主 ticker；形态照抄 GuardTicker 的已实证注册模式）。
+        if (!ClassInjector.IsTypeRegisteredInIl2Cpp<FastInjectTicker>())
+            ClassInjector.RegisterTypeInIl2Cpp<FastInjectTicker>();
+        var fastGo = new GameObject("EndlessGuard.FastTicker");
+        Object.DontDestroyOnLoad(fastGo);
+        fastGo.AddComponent<FastInjectTicker>();
+
         Trace("loaded：cfg=" + Enabled.Value + "," + PreventNewFalls.Value + "," + RestoreFallenPoints.Value + "," + ExtendScavengePlans.Value
             + "；xp=" + (XPEnabled != null && XPEnabled.Value) + ",tower=" + (ArrowTowerEnabled != null && ArrowTowerEnabled.Value));
         Log.LogInfo("[EndlessGuard] 囤鼠桃园 loaded（拦沦陷/恢复/剥tag/规划扩展）");
@@ -120,5 +128,48 @@ internal sealed class GuardTicker : MonoBehaviour
         try { ScavengePlans.OnConfigStep(); } catch (Exception e) { EndlessGuardPlugin.Trace("ticker ScavengePlans: " + e.Message); }
         try { DeviceXpRuntime.OnStep(); } catch (Exception e) { EndlessGuardPlugin.Trace("ticker DeviceXp: " + e.Message); }
         try { ArrowTower.OnStep(); } catch (Exception e) { EndlessGuardPlugin.Trace("ticker Tower: " + e.Message); }
+    }
+}
+
+/// <summary>fixwave5 F1 快注入 ticker（0.25s）：race 实证（两场 live trace，2026-10-31）——存档家具
+/// 实例化可先于表注入落地（旧注入门=ConfigManager 就绪 + GuardTicker 2s 步进），输掉竞态的会话里
+/// 设备以「无模型」态出生（官方 LoadGameObject(P_Tripo05) miss 返 null 时我方 supply 尚未 armed）。
+/// 本 ticker 只跑表注入快路 ArrowTower.TryInjectFast()（不含 FX/heal 全量巡检），表首次全绿即退役
+///（SetActive(false) + 一条 `[Tower] fast-inject armed→retired`），此后零开销常驻；2s 主 ticker 的
+/// 哨兵重放职责不受影响。形态照抄 GuardTicker 已实证模式（RegisterTypeInIl2Cpp + 独立 GameObject
+/// ——退役 SetActive(false) 不连坐主 ticker——+ DontDestroyOnLoad + AddComponent；public Update +
+/// IntPtr 双构造器，interop 注入类引擎回调只桥接 public 生命周期方法）。门=Enabled 主开关 +
+/// Defense.ArrowTowerEnabled（功能关=静默退役，不空转）。</summary>
+internal sealed class FastInjectTicker : MonoBehaviour
+{
+    private float _acc;
+    private bool _retired;
+    public FastInjectTicker(IntPtr p) : base(p) { }
+    public FastInjectTicker() { }
+    public void Update()
+    {
+        if (_retired) return;
+        _acc += UnityEngine.Time.unscaledDeltaTime;
+        if (_acc < 0.25f) return;
+        _acc = 0;
+        if (EndlessGuardPlugin.Enabled != null && !EndlessGuardPlugin.Enabled.Value) return;
+        try
+        {
+            if (EndlessGuardPlugin.ArrowTowerEnabled != null && !EndlessGuardPlugin.ArrowTowerEnabled.Value)
+            {
+                Retire(trace: false);   // 功能关=快注入永不成功，静默退役（不占 0.25s 空转；主 ticker 照管其余功能）
+                return;
+            }
+            if (ArrowTower.TryInjectFast()) Retire(trace: true);
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] fast-inject: " + e.Message); }
+    }
+
+    private void Retire(bool trace)
+    {
+        if (_retired) return;
+        _retired = true;
+        try { gameObject.SetActive(false); } catch { }
+        if (trace) EndlessGuardPlugin.Trace("[Tower] fast-inject armed→retired");
     }
 }

@@ -214,11 +214,42 @@ internal static class ArrowTowerModel
                 localPos: __2, localEuler: __3, localScale: __4);
     }
 
+    /// <summary>补发入口（fixwave5 F3 增补：结果包装一层无答 miss 取证——P_Tripo05 请求拿到 null 且
+    /// 我方未补发=竞态/门控状态新线索通道，每次会话只记一行）；核心见 SupplyCore。</summary>
+    private static GameObject Supply(string path, GameObject fallback, GameObject root, bool worldStays,
+        Vector3? localPos, Vector3? localEuler, Vector3? localScale)
+    {
+        var result = SupplyCore(path, fallback, root, worldStays, localPos, localEuler, localScale);
+        NoteUnansweredMiss(path, result);
+        return result;
+    }
+
+    /// <summary>F3 取证（一次性）：P_Tripo05 路径请求最终返 null（官方 miss 且我方未补发——含门未开
+    /// armed/built 未就绪等状态）时打一行快照，之后静默。mod 总门关闭不算线索（人为关功能，非竞态）。
+    /// 任何异常吞掉——取证行绝不干扰供给路径。</summary>
+    private static bool _missTraced;
+
+    private static void NoteUnansweredMiss(string path, GameObject result)
+    {
+        try
+        {
+            if (_missTraced || result != null || string.IsNullOrEmpty(path)) return;
+            if (path.IndexOf(ArrowTower.ResName, StringComparison.Ordinal) < 0) return;
+            if (EndlessGuardPlugin.Enabled != null && !EndlessGuardPlugin.Enabled.Value) return;
+            if (EndlessGuardPlugin.ArrowTowerEnabled != null && !EndlessGuardPlugin.ArrowTowerEnabled.Value) return;
+            _missTraced = true;
+            EndlessGuardPlugin.Trace("[Tower] supply miss unanswered: " + path
+                                     + " armed=" + _armed + " built=" + _built
+                                     + "（P_Tripo05 请求返 null 且我方未补发——竞态/门控线索，fixwave5 F3）");
+        }
+        catch { }
+    }
+
     /// <summary>补发核心：仅当 path 命中箭塔名且原结果为 null（=官方缓存/资源双 miss，disasm 实证
     /// 此态返 null 不抛）时，Instantiate 模板并镜像官方命中路径的后处理。任何异常→原样放行官方值。
     /// F2：模板在此（首次 miss=场景内）才懒建（门=_armed，ArrowTower.OnStep 置位）；
     /// F3：供给后测高自证，父链非 1 缩放把世界高校回 ≈1.9。</summary>
-    private static GameObject Supply(string path, GameObject fallback, GameObject root, bool worldStays,
+    private static GameObject SupplyCore(string path, GameObject fallback, GameObject root, bool worldStays,
         Vector3? localPos, Vector3? localEuler, Vector3? localScale)
     {
         GameObject inst = null;

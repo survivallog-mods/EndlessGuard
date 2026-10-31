@@ -18,6 +18,10 @@ namespace SurvivalLog.EndlessGuard;
 /// 本地化：Name/Name_Local、Des/Des_Local、ItemName(_Local)、ShopName(_Local) 全部直写字面中文
 ///（官方消费方把键走 GetLocalText→GetLocalTxt，键 miss 原样透传输入串，ScavengePlans 2026-10-25 实机截图实锤）。
 /// 全列表字段非 null（官方消费方直接 .Count，null 即 NRE——ScavengePlans.NewCondSet 教训）。
+/// ═══ fixwave5（2026-10-31，两场 live trace 定案 race 根因）═══
+/// F1 快注入：存档家具实例化可早于表注入落地（旧门=ConfigManager 就绪 + 2s 步进），输掉竞态的会话里
+/// 设备以「无模型」态出生（官方 LoadGameObject(P_Tripo05) miss 返 null、我方 supply 尚未 armed）。
+/// FastInjectTicker（0.25s，EndlessGuardPlugin.cs）只跑表注入快路 TryInjectFast，首次全绿即退役。
 /// interop 属性名经 mdump 实测（E:\SteamLibrary\...\BepInEx\interop\HotUpdate.dll，2026-10-30，
 /// 实测命令：mdump.exe HotUpdate.dll "Config_TowerDevice,Config_Furniture,Config_Item,Config_ProductionList,Config_DefenseLv,ConfigManager"）：
 /// - Config_TowerDevice：ID/AttackPriority/MaxAttackers/IsWalkThrough/ExclusiveCharacter/Attack/
@@ -59,36 +63,60 @@ internal static class ArrowTower
     /// <summary>GuardTicker 2s 巡检入口（照抄 ScavengePlans.OnConfigStep：总开关下再挂本功能开关；
     /// Cm() 单例未建→下轮再试；五张 dict 任一未装载→下轮再试；哨兵齐→稳态静默返回）。
     /// fixwave2：派生等级行（99112..99155）随四表一起注入/哨兵重放；另有成长 cfg 新鲜度哨兵——
-    /// 步长/系数类 cfg 改值后重建派生行内容（组件面板在下次官方重初始化时吸收新值）。</summary>
+    /// 步长/系数类 cfg 改值后重建派生行内容（组件面板在下次官方重初始化时吸收新值）。
+    /// fixwave5：表工作抽为 EnsureTables 共享核（F1 快注入同一条路）。</summary>
     internal static void OnStep()
     {
-        if (EndlessGuardPlugin.ArrowTowerEnabled != null && !EndlessGuardPlugin.ArrowTowerEnabled.Value) return;   // 关=不注入（已注入行为进程内存态，本局保留，重启干净）
+        if (!EnsureTables()) return;          // 表未就绪/本轮注入后仍未全绿（如 Lv4 行漂移）→ 下轮再试
+        ArrowTowerFx.EnsureStarted();         // 表稳态懒建动画/弹道 ticker（门=ArrowTowerEnabled，裁决见 ArrowTowerFx 类头；T8）
+    }
+
+    /// <summary>fixwave5 F1 快注入快路（FastInjectTicker 0.25s 消费）：只做表注入/哨兵这一件事，
+    /// 不含 FX/heal 全量巡检。返回 true=五哨兵全绿（表已稳态，快 ticker 收到即退役）。
+    /// 与 OnStep 共用 EnsureTables 同一条幂等路径（先到者赢，后到者空转一轮即出）。</summary>
+    internal static bool TryInjectFast() => EnsureTables();
+
+    /// <summary>表注入共享核：门（功能开关/Cm 就绪/五 dict 装载）→ 哨兵复查 → 全绿直返（顺带 Arm，
+    /// 模板仍等首次 supply 才懒建）→ 不全绿则 Inject（行级幂等）后复核。返回 false=本轮尚未稳态
+    ///（装表中/Lv4 行漂移等），调用方下轮再试。fast ticker 退役与 OnStep 稳态判定同源于此。</summary>
+    private static bool EnsureTables()
+    {
+        if (EndlessGuardPlugin.ArrowTowerEnabled != null && !EndlessGuardPlugin.ArrowTowerEnabled.Value) return false;   // 关=不注入（已注入行为进程内存态，本局保留，重启干净）
         var cm = BagTable.Cm();
-        if (cm == null) return;
+        if (cm == null) return false;
 
         var td = cm._Config_TowerDevice_Dict;
         var fu = cm._Config_Furniture_Dict;
         var it = cm._Config_Item_Dict;
         var pl = cm._Config_ProductionList_Dict;
         var dl = cm._Config_DefenseLv_Dict;
-        if (td == null || fu == null || it == null || pl == null || dl == null) return;   // 装表中（2026-10-24 实锤：Cm() 就绪≠dict 就绪），下轮再试
+        if (td == null || fu == null || it == null || pl == null || dl == null) return false;   // 装表中（2026-10-24 实锤：Cm() 就绪≠dict 就绪），下轮再试
 
-        // 哨兵复查（Plans[0] 模式）：官方重试/换语言重跑 Initialize 会整体重建 _Config_*_Dict——
-        // 四表任一丢 99005、派生行缺任一、或 Lv4 丢解锁项即全量重放（Inject 内部逐行 ContainsKey/Contains 幂等，重放无副作用）
+        if (SentinelsGreen(td, fu, it, pl, dl))
+        {
+            ArrowTowerModel.Arm();            // F2：只武装不建——模板推迟到首次 supply（场景内、设备在场）再拼
+            return true;
+        }
+        Inject(td, fu, it, pl, dl);
+        return SentinelsGreen(td, fu, it, pl, dl);   // Inject 逐字段拍平=当轮应绿；false=表漂移（Lv4 行缺失等），下轮重试
+    }
+
+    /// <summary>五哨兵复查（Plans[0] 模式，求值顺序与短路保持 fixwave2 原语义）：官方重试/换语言重跑
+    /// Initialize 会整体重建 _Config_*_Dict——四表任一丢 99005、派生行缺任一、或 Lv4 丢解锁项即判不全绿
+    ///（Inject 内部逐行 ContainsKey/Contains 幂等，重放无副作用）。</summary>
+    private static bool SentinelsGreen(
+        Il2CppSystem.Collections.Generic.Dictionary<int, GameCore.HotUpdate.Config_TowerDevice> td,
+        Il2CppSystem.Collections.Generic.Dictionary<int, GameCore.HotUpdate.Config_Furniture> fu,
+        Il2CppSystem.Collections.Generic.Dictionary<int, GameCore.HotUpdate.Config_Item> it,
+        Il2CppSystem.Collections.Generic.Dictionary<int, GameCore.HotUpdate.Config_ProductionList> pl,
+        Il2CppSystem.Collections.Generic.Dictionary<int, GameCore.HotUpdate.Config_DefenseLv> dl)
+    {
         bool rowsMissing = !td.ContainsKey(Id) || !fu.ContainsKey(Id) || !it.ContainsKey(Id) || !pl.ContainsKey(Id);
         bool derivedMissing = !rowsMissing && DerivedRowsMissing(td, fu);
         bool legacyNeedsSync = !rowsMissing && !derivedMissing && LegacyRowNeedsSync(fu, it);
         bool lv4Missing = !dl.TryGetValue(DefenseLvKey, out var lv4) || lv4 == null || !Contains(lv4.unlock_recipes, Id);
         bool xpStale = !rowsMissing && !derivedMissing && !legacyNeedsSync && DerivedRowsStale();
-        if (!rowsMissing && !derivedMissing && !legacyNeedsSync && !lv4Missing && !xpStale)
-        {
-            ArrowTowerModel.Arm();                // F2：只武装不建——模板推迟到首次 supply（场景内、设备在场）再拼
-            ArrowTowerFx.EnsureStarted();         // 表稳态懒建动画/弹道 ticker（门=ArrowTowerEnabled，裁决见 ArrowTowerFx 类头；T8）
-            return;
-        }
-        Inject(td, fu, it, pl, dl);
-        ArrowTowerModel.Arm();                    // F2：注入完成轮同样武装（模板仍等首次 supply）
-        ArrowTowerFx.EnsureStarted();
+        return !rowsMissing && !derivedMissing && !legacyNeedsSync && !lv4Missing && !xpStale;
     }
 
     /// <summary>F1/F6 旧版建行探测（行在我方 99005 上，只有本 mod 会建此 id）：①家具行
