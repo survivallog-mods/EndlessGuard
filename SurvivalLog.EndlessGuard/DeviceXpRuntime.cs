@@ -11,7 +11,9 @@ namespace SurvivalLog.EndlessGuard;
 
 /// <summary>
 /// 防御设备经验运行时（Task 3；spec docs/superpowers/specs/2026-10-30-defense-upgrade-arrowtower-design.md §3.4/§3.6）：
-/// 四锚点 Harmony 补丁（TakeDamage/FireDevice/ApplyZombieBite/HitZombieByWreck）+ 入账 Award + 升级生效 ApplyLevel。
+/// 六锚点 Harmony 补丁（TakeDamage/FireDevice/ApplyZombieBite/HitZombieByWreck + F4 粘性回贴
+/// TowerDeviceComponent.OnInit 与 FurnitureDurabilityComponent.Initialize——官方重快照源头当场
+/// 复贴等级值，2026-10-31 playtest"升级被反复还原"的根治）+ 入账 Award + 升级生效 ApplyLevel。
 /// 挂载走 EndlessGuardPlugin.Load 的逐类自动装配（每个 [HarmonyPatch] 嵌套类独立异常隔离），本类不自建 Harmony 实例。
 ///
 /// ===== Step-1 反汇编/interop 实证（mdump 实测 interop HotUpdate.dll 2026-10-23_26157732 + gamekb dump.cs，Task 3 复核）=====
@@ -182,7 +184,8 @@ internal static class DeviceXpRuntime
             {
                 _stepSlot = SlotKey;
                 Bases.Clear();
-                Fuses.Clear();   // 熔断器与基线同生命周期：换档=新会话，压制态一并复位（评审 I1）
+                Fuses.Clear();     // 熔断器与基线同生命周期：换档=新会话，压制态一并复位（评审 I1）
+                StickyTicks.Clear();   // F4 粘性节流戳与基线同生命周期（防陈旧槽时间戳跨会话）
             }
 
             // ② 脏账本落盘冲刷（成功才清旗，失败下步重试）
@@ -341,8 +344,9 @@ internal static class DeviceXpRuntime
 
     /// <summary>升级生效（brief Produces 契约：ApplyLevel(Furniture, int)）：武器类直写 Attack/AttackIntervalSeconds，
     /// AttackRangeSqr 仅箭塔(99005)（=TargetRange²）；耐久 AddMaxDurability(delta)+AddCurrentDurability(delta)（delta=target-现值，
-    /// 首次升级 delta==stepAbs，与裁决公式重合；正增量同步回满=满血语义，负增量（读档已含成长）不动）。</summary>
-    internal static void ApplyLevel(Furniture f, int lv)
+    /// 首次升级 delta==stepAbs，与裁决公式重合；正增量同步回满=满血语义，负增量（读档已含成长）不动）。
+    /// F4：durabilityOnly=true 时只回贴耐久（FurnitureDurabilityComponent.Initialize 粘性位不碰攻击面板）。</summary>
+    internal static void ApplyLevel(Furniture f, int lv, bool durabilityOnly = false)
     {
         try
         {
@@ -354,7 +358,7 @@ internal static class DeviceXpRuntime
             var b = GetOrCaptureBase(ownerId, tower, dura);
             if (b == null) return;
 
-            if (IsWeaponClass(cfgId) && tower != null)
+            if (!durabilityOnly && IsWeaponClass(cfgId) && tower != null)
             {
                 tower.Attack = DeviceXpMath.TargetAttack(b.Attack, lv, WeaponAtkStep);
                 tower.AttackIntervalSeconds = DeviceXpMath.TargetInterval(b.Interval, lv, WeaponIntervalStep);
@@ -467,8 +471,9 @@ internal static class DeviceXpRuntime
         catch { return null; }
     }
 
-    /// <summary>家具 cellKey：TransformComponent.Position 四舍五入 "x,z"；不可达退化 ownerId（裁决注明，T4 复核）。</summary>
-    private static string CellKeyOf(Furniture f)
+    /// <summary>家具 cellKey：TransformComponent.Position 四舍五入 "x,z"；不可达退化 ownerId（裁决注明，T4 复核）。
+    /// internal=F5 悬停取证要打账本键字符串（DeviceXpHover 同装配）。</summary>
+    internal static string CellKeyOf(Furniture f)
     {
         try
         {
@@ -712,6 +717,86 @@ internal static class DeviceXpRuntime
                 Award(furniture, wreck);
             }
             catch (Exception e) { EndlessGuardPlugin.Trace("[XP] HitZombieByWreck postfix: " + e.Message); }
+        }
+    }
+
+    // =====================================================================
+    // 锚点 5/6（F4 粘性复贴，2026-10-31 playtest "升级被官方反复还原"）：官方重快照的【源头】
+    // 当场回贴等级值——TowerDeviceComponent.OnInit(int)（攻击面板重快照）与
+    // FurnitureDurabilityComponent.Initialize(int,int)（耐久重快照，读档/重入/修理路径共用）。
+    // 2s ticker 对账仍是兜底；这两补丁把"快照→追平"之间最长 2s 的回退可见窗压缩到 0。
+    // 签名钉死（dump.cs 369641 / 369102，均单重载公开方法，非属性——红线自检过）。
+    // =====================================================================
+
+    /// <summary>F4 粘性节流（同设备 2s 最多回贴一次）：防官方风暴式重初始化时 trace 刷屏/重复写；
+    /// TickCount 环绕安全比较。2s ticker 对账不受此限（独立路径，仍兜全量）。</summary>
+    private static readonly Dictionary<long, int> StickyTicks = new();
+
+    /// <summary>粘性回贴核心：属主在册且账本 Lv&gt;1 → ApplyLevel 重放（基线快照"首见即拍"发生在
+    /// 官方重快照之后=拍到的恰是原厂值，重放幂等收敛）。无账目/低级=静默放行（新放置设备零扰动）。</summary>
+    private static void StickyReapply(Furniture f, int cfgId, bool durabilityOnly)
+    {
+        try
+        {
+            var ownerId = f.InstanceId;
+            var now = Environment.TickCount;
+            if (StickyTicks.TryGetValue(ownerId, out var last)
+                && unchecked((uint)(now - last)) < 2000) return;
+            RefreshSlotKey();
+            if (!Store.TryGet(SlotKey, cfgId, CellKeyOf(f), out var e) || e == null || e.Lv <= 1) return;
+            StickyTicks[ownerId] = now;
+            ApplyLevel(f, e.Lv, durabilityOnly);
+            EndlessGuardPlugin.Trace("[XP] reinit-sticky cfg=" + cfgId + " lv=" + e.Lv
+                                     + (durabilityOnly ? " (hp)" : ""));
+        }
+        catch (Exception ex) { EndlessGuardPlugin.Trace("[XP] reinit-sticky: " + ex.Message); }
+    }
+
+    /// <summary>锚点 5（F4）：TowerDeviceComponent.OnInit 后官方刚重快照攻击面板——属主受追踪且
+    /// 账本 Lv&gt;1 即整级回贴（攻击+耐久都重申；耐久路径幂等只加不减）。</summary>
+    [HarmonyPatch]
+    internal static class TowerInitStickyPatch
+    {
+        private static MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(TowerDeviceComponent), "OnInit", new[] { typeof(int) });
+
+        private static void Postfix(TowerDeviceComponent __instance, int furnitureConfigId)
+        {
+            try
+            {
+                if (__instance == null || !XpOn()) return;   // XP 关=字节透传
+                var furn = ResolveFurniture(__instance.ownerInstanceId);
+                if (furn == null) return;
+                var cfgId = furn.AgentConfigId;              // 以属主实配为准（furnitureConfigId 入参互核用不上）
+                if (!DeviceXpMath.IsTrackedDevice(cfgId)) return;
+                StickyReapply(furn, cfgId, durabilityOnly: false);
+            }
+            catch (Exception e) { EndlessGuardPlugin.Trace("[XP] reinit-sticky probe(tower): " + e.Message); }
+        }
+    }
+
+    /// <summary>锚点 6（F4）：FurnitureDurabilityComponent.Initialize(int,int) 后官方刚重快照耐久——
+    /// 只回贴耐久（durabilityOnly，不碰攻击面板）。全家具都会走此方法：靠 IsTrackedDevice+账本双重
+    /// 门把开销压到字典查询级（门窗等一笔比较即出）。</summary>
+    [HarmonyPatch]
+    internal static class DurabilityInitStickyPatch
+    {
+        private static MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(FurnitureDurabilityComponent), "Initialize",
+                new[] { typeof(int), typeof(int) });
+
+        private static void Postfix(FurnitureDurabilityComponent __instance, int curDurability, int maxDurability)
+        {
+            try
+            {
+                if (__instance == null || !XpOn()) return;   // XP 关=字节透传
+                var furn = ResolveFurniture(__instance.ownerInstanceId);
+                if (furn == null) return;
+                var cfgId = furn.AgentConfigId;
+                if (!DeviceXpMath.IsTrackedDevice(cfgId)) return;
+                StickyReapply(furn, cfgId, durabilityOnly: true);
+            }
+            catch (Exception e) { EndlessGuardPlugin.Trace("[XP] reinit-sticky probe(dura): " + e.Message); }
         }
     }
 }

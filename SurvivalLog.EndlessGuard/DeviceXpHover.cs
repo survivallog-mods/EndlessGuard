@@ -41,6 +41,9 @@ namespace SurvivalLog.EndlessGuard;
 ///
 /// 边界与让步：悬停期间新入账不实时刷新（推送按悬停事件触发，再悬停即新值）；Lv1 且无账本条目
 /// 的设备一字节不动（官方原名零污染）；broken 名用游戏同款模板先行拼接再附等级，损坏态显示不丢。
+/// F5（2026-10-31 playtest 取证补强）：增强从不出现且零错误——①首次触发打全量解析现场（槽/格键/
+/// 账本键字符串命中与否/showId）；②推送通道逐态节流 trace（pushed/缺失态/异常文本）。两处一次性
+/// 或同文一次，稳态零噪音。显示规则收口为「有账目且（Lv&gt;1 或 XP&gt;0）」（原条件等价，改写对齐 spec）。
 /// 全程 try/catch + Trace（全文约定：不静默吞）；无新 Harmony 实例（[HarmonyPatch] 走 Load 逐类
 /// 自动装配）、无属性 getter 补丁、无 async 状态机。
 /// </summary>
@@ -50,6 +53,13 @@ internal static class DeviceXpHover
     /// <summary>通道裁决旗（brief 决策门）：false=样式A 主路径（后缀重推显示名）；true=样式B TextMesh
     /// 兜底。Step-1 反汇编实证通道可写（见类头），恒 false；样式B未实现（其启用条件不成立）。</summary>
     internal const bool HoverFallback = false;
+
+    // ── F5 取证（2026-10-31 playtest：官方 HP 全设备显示、我方 Lv/XP 增强从不出现且零错误 trace）──
+    // 一次性/节流探针：①首次触发打全量解析现场（cfg/槽/格键/账本键字符串命中与否/showId）；
+    // ②推送通道逐态节流 trace（同文一次，换态重发）——下轮实机据此定位真实失败点。
+    private static int _fires;                 // postfix 触发计数（gates 之后；首次触发打全量现场）
+    private static bool _firstTraced;
+    private static string _lastPushTrace;      // 推送态节流（FireDevicePatch.WarnOnce 同款）
 
     // 签名钉死（防重载/漂移静默 miss；dump.cs 376394 + interop mdump 实测 Void(Boolean)，单重载公开）
     private static MethodBase TargetMethod() =>
@@ -63,17 +73,42 @@ internal static class DeviceXpHover
             if (EndlessGuardPlugin.Enabled != null && !EndlessGuardPlugin.Enabled.Value) return;   // 总开关关=字节透传
             if (!DeviceXpRuntime.XpOn()) return;   // Defense.XPEnabled=false=悬停不加等级（Task 9 门）
             if (EndlessGuardPlugin.ShowLevel != null && !EndlessGuardPlugin.ShowLevel.Value) return;   // Defense.ShowLevel=false=官方原名
-            if (!DeviceXpRuntime.TryGetLevelInfo(__instance, out var lv, out var xp, out var next)) return;
-            if (lv <= 1 && xp <= 0) return;   // Lv1 零经验=无可展示，官方原名零污染
+            _fires++;
+            var hit = DeviceXpRuntime.TryGetLevelInfo(__instance, out var lv, out var xp, out var next);
+            if (!_firstTraced)
+            {
+                _firstTraced = true;
+                // F5 取证①（一次性）：槽/格键/账本键字符串/showId 全量现场（键格式应如 "14,-22"，
+                // 与 Award 侧同源 CellKeyOf——若实机此行显示 MISS 即键口径漂移的直证）
+                var cell = DeviceXpRuntime.CellKeyOf(__instance);
+                var key = DeviceXpRuntime.SlotKey + "|" + __instance.AgentConfigId + "|" + cell;
+                EndlessGuardPlugin.Trace("[XP] hover#" + _fires + " fired cfg=" + __instance.AgentConfigId
+                                         + " slot=" + DeviceXpRuntime.SlotKey + " cell=" + cell
+                                         + " ledger=" + (hit ? "hit" : "MISS") + "(key=\"" + key + "\")"
+                                         + " lv=" + lv + " xp=" + xp + " showId=" + __instance.ShowInstanceId);
+            }
+            if (!hit) return;
+            if (!(lv > 1 || xp > 0)) return;   // F5(i)：有账目且（已升级 或 有经验）才显示；Lv1 零经验=官方原名零污染
 
             var name = BaseNameOf(__instance.AgentConfigId, broken);
             if (string.IsNullOrEmpty(name)) return;   // 配置/本地化不可达=不动（与官方显示一致，宁缺毋炸）
             var text = next < 0
                 ? $"{name} Lv.{lv} MAX"
-                : $"{name} Lv.{lv} · 升级 {xp}/{next}";   // brief 逐字格式「名称 Lv.N · 升级 x/y」
-            PushHoverName(__instance, text);
+                : $"{name} Lv.{lv} · 升级 {xp}/{next}";   // F5(ii)：brief 逐字格式「名称 Lv.N · 升级 x/y」（核对无误）
+            TracePushState(PushHoverName(__instance, text));
         }
         catch (Exception e) { EndlessGuardPlugin.Trace("[XP] hover postfix: " + e.Message); }
+    }
+
+    /// <summary>F5 取证②：推送通道逐态节流 trace（同文一次、换文重发）——"pushed" 只见一次，
+    /// world/model 缺失或推送异常各自露脸一次并带现场值。</summary>
+    private static void TracePushState(string state)
+    {
+        if (string.IsNullOrEmpty(state)) return;
+        var line = "[XP] hover push: " + state;
+        if (string.Equals(line, _lastPushTrace, StringComparison.Ordinal)) return;
+        _lastPushTrace = line;
+        EndlessGuardPlugin.Trace(line);
     }
 
     /// <summary>官方基名重建（与原方法①②③逐句同款）：配置名→本地化→损坏模板。拿不到=null（跳过增写）。</summary>
@@ -93,11 +128,21 @@ internal static class DeviceXpHover
     }
 
     /// <summary>同一通道重推（原方法④的处理器直达）：show id → AgentModel → Furniture_SetDisplayName。
-    /// 世界未建/模型未就绪=静默跳过（本帧官方原名，下次悬停再试）。</summary>
-    private static void PushHoverName(Furniture f, string text)
+    /// 世界未建/模型未就绪=静默跳过（本帧官方原名，下次悬停再试）。F5：返状态串供取证
+    ///（"pushed"/各级缺失现场/异常文本——异常在此捕获转文，postfix 大 catch 只兜意外）。</summary>
+    private static string PushHoverName(Furniture f, string text)
     {
-        if (!GameCore.HotUpdate.BaseSingleton<BattleShowWorld>.IsInstanceCreated) return;
+        if (!GameCore.HotUpdate.BaseSingleton<BattleShowWorld>.IsInstanceCreated)
+            return "world 未建（本帧跳过）";
         var mgr = GameCore.HotUpdate.BaseSingleton<BattleShowWorld>.Instance?._AgentModelManager;
-        mgr?.GetAgentModel(f.ShowInstanceId)?.Furniture_SetDisplayName(text);
+        if (mgr == null) return "mgr null";
+        var model = mgr.GetAgentModel(f.ShowInstanceId);
+        if (model == null) return "model null showId=" + f.ShowInstanceId;
+        try
+        {
+            model.Furniture_SetDisplayName(text);
+            return "pushed";
+        }
+        catch (Exception e) { return "push 异常: " + e.Message; }
     }
 }
