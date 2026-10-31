@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using SurvivalLog.ModShared;
 
 namespace SurvivalLog.EndlessGuard;
@@ -75,10 +76,15 @@ internal static class ArrowTower
     private const string Lv4AppendText = "\\n新增：解锁 箭塔";  // 现场格式为字面 \n 两字符（gamekb dump 实证），同款追加
     private const int ChainsawUnpackAction = 100026004;       // 官方拆封动作（复用，见类头裁定）
     // F6 图标（2026-10-31 playtest：包裹图标=电锯图标，作者不满）：改借官方材料「木板」20106 的图标
-    //（gamekb Config_Item 20106 逐字实测），与四件套设备图标全部区分。手绘箭塔专属图标=后续美术工作
-    //（游戏 item 表零弓/弩/箭类物品可借——全表检索实证，木板是现成图标里区分度最高的一张）。
-    private const string IconTex = "Assets/RuntimeAssets/Texture/Material/UI_Item_Icon_Mat_M_muban";              // 木板图标（F6）
-    private const string IconWebMat = "../../Res/Material/UI_Item_Icon_Mat_M_muban.png";                          // 木板 web 图标（20106 同款）
+    //（gamekb Config_Item 20106 逐字实测），与四件套设备图标全部区分。
+    // wave8 起木板只作退路：专属图标（自绘塔+弩 png）走 WebUI/Res 磁盘通道—— crafting UI（ToolTable.html）
+    // 把 <img src=product.icon> 直绑相对路径，"../../Res/..." 按普通文件从 <游戏根>/SurvivalLog_Data/
+    // StreamingAssets/WebUI/Res/ 解析（控制器实证，该目录 ~480MB 散装 png）；落盘成功 Icon/WebIcon 都指
+    // 专属文件，失败/目录契约不成立则维持 F6 木板同款（判路见 EnsureIconFile/IconNow）。
+    private const string IconTex = "Assets/RuntimeAssets/Texture/Material/UI_Item_Icon_Mat_M_muban";              // 木板图标（F6，退路）
+    private const string IconWebMat = "../../Res/Material/UI_Item_Icon_Mat_M_muban.png";                          // 木板 web 图标（20106 同款，退路）
+    private const string IconCustom = "../../Res/Icon/eg_arrow_tower.png";                                        // wave8 专属图标（WebUI/Res 磁盘通道）
+    private const string IconResourceName = "SurvivalLog.EndlessGuard.Resources.eg_arrow_tower.png";              // 内嵌资源名（csproj EmbeddedResource）
     private const string IconWeb = "../../Res/Furniture/UI_Item_Icon_Furnit_M_831300316.png";                     // 家具行 ICON 维持电锯（F6 只改物品行）
     private const string PackageModel = "Assets/RuntimeAssets/Prefabs/Furniture/P_Paperbox_009_S1_M02";           // 与 26004 同款纸盒
 
@@ -114,6 +120,8 @@ internal static class ArrowTower
         var pl = cm._Config_ProductionList_Dict;
         var dl = cm._Config_DefenseLv_Dict;
         if (td == null || fu == null || it == null || pl == null || dl == null) return false;   // 装表中（2026-10-24 实锤：Cm() 就绪≠dict 就绪），下轮再试
+
+        EnsureIconFile();                     // wave8：专属图标落盘先行（结果定 99005 行 Icon/WebIcon 走专属还是木板退路；快注入/OnStep 同此路）
 
         if (SentinelsGreen(td, fu, it, pl, dl))
         {
@@ -305,6 +313,82 @@ internal static class ArrowTower
         catch { return null; }
     }
 
+    // =====================================================================
+    // wave8：专属图标落盘（WebUI/Res 磁盘通道，替换木板占位）
+    // =====================================================================
+
+    /// <summary>图标落盘判定缓存：null=未判定，true=eg_arrow_tower.png 已就绪（注入走专属路径），
+    /// false=本会话定版退回木板（目录契约不成立/内嵌资源缺失/写入失败均一票定版，不反复重试刷盘）。</summary>
+    private static bool? _iconReady;
+
+    /// <summary>物品行 Icon 现行定版：落盘成功=专属 png 相对路径，否则退回 F6 木板 bundle 路径。</summary>
+    private static string IconNow => _iconReady == true ? IconCustom : IconTex;
+
+    /// <summary>物品行 WebIcon 现行定版：落盘成功=专属 png，否则退回 F6 木板 web 路径。</summary>
+    private static string IconWebNow => _iconReady == true ? IconCustom : IconWebMat;
+
+    /// <summary>wave8：把内嵌专属图标写到 <游戏根>/SurvivalLog_Data/StreamingAssets/WebUI/Res/Icon/
+    /// eg_arrow_tower.png（ToolTable.html 直绑相对路径=普通磁盘文件，控制器实证通道）。游戏根取
+    /// Paths.BepInExRootPath 上溯两级；先验 Res 目录存在（目录契约不成立绝不乱建目录→一次性 trace 后
+    /// 本会话定版木板退路），Res 内补建 Icon 子目录（幂等，与 DeviceXpStore「首次保存自动建目标目录」
+    /// 同款）。写策略：文件缺失或字节数与内嵌资源不符才写（temp+File.Move 原子替换同款），真写才 trace。
+    /// 表注入共享核入口每轮调用（快注入/OnStep 同路），稳态成本=一次 Exists+Length 探测。全链 try/catch。</summary>
+    /// <returns>true=专属文件就绪（99005 行 Icon/WebIcon 可指 IconCustom）。</returns>
+    private static bool EnsureIconFile()
+    {
+        if (_iconReady != null) return _iconReady == true;   // 判定过（成败均定版）→ 直接复用，不再碰盘
+        try
+        {
+            var root = Path.GetFullPath(Path.Combine(BepInEx.Paths.BepInExRootPath, "..", ".."));   // BepInEx 上溯两级=游戏根
+            var resDir = Path.Combine(root, "SurvivalLog_Data", "StreamingAssets", "WebUI", "Res");
+            if (!Directory.Exists(resDir))
+            {
+                _iconReady = false;                          // 目录契约不成立：不在错误位置建目录，本会话维持木板
+                EndlessGuardPlugin.Trace("[Tower] icon: WebUI/Res 目录不存在（" + resDir + "），保留木板图标");
+                return false;
+            }
+            Directory.CreateDirectory(Path.Combine(resDir, "Icon"));   // 已有则空转；只在已验证的 Res 下补子目录
+            var target = Path.Combine(resDir, "Icon", "eg_arrow_tower.png");
+            var bytes = ReadEmbeddedIcon();
+            if (bytes == null)
+            {
+                _iconReady = false;                          // 内嵌资源缺失（构建配置病态）：木板退路
+                EndlessGuardPlugin.Trace("[Tower] icon: 内嵌资源缺失（" + IconResourceName + "，查 csproj EmbeddedResource），保留木板图标");
+                return false;
+            }
+            var fi = new FileInfo(target);
+            if (!fi.Exists || fi.Length != bytes.Length)     // 缺失或过期（如旧版残留）才写；一致则零写入零 trace
+            {
+                var tmp = target + ".tmp";
+                File.WriteAllBytes(tmp, bytes);
+                File.Move(tmp, target, true);
+                EndlessGuardPlugin.Trace("[Tower] icon file written: " + target + " (" + bytes.Length + " bytes)");
+            }
+            _iconReady = true;
+            return true;
+        }
+        catch (Exception e)
+        {
+            _iconReady = false;                              // 写失败（权限等）：本会话木板退路，已 trace 不再刷屏
+            EndlessGuardPlugin.Trace("[Tower] icon: 落盘失败（" + e.Message + "），保留木板图标");
+            return false;
+        }
+    }
+
+    /// <summary>读内嵌专属图标字节；资源缺失返 null（Trace 级兜底，不抛）。</summary>
+    private static byte[] ReadEmbeddedIcon()
+    {
+        try
+        {
+            using var s = typeof(ArrowTower).Assembly.GetManifestResourceStream(IconResourceName);
+            if (s == null) return null;
+            using var ms = new MemoryStream();
+            s.CopyTo(ms);
+            return ms.ToArray();
+        }
+        catch { return null; }
+    }
+
     /// <summary>F1/F6 旧版建行探测（行在我方 99005 上，只有本 mod 会建此 id）：①家具行
     /// RemoveFunc/MoveFunc 空（老 DLL 建的行，缺它们=塔无法卸载/搬动，官方 36004 同款 [299]/[1608]）；
     /// ②物品行 Icon/WebIcon 不是当前定版图标（F6：老行还挂电锯图标）→ 视同缺行触发 Inject 重放；
@@ -319,7 +403,7 @@ internal static class ArrowTower
                 && (f.RemoveFunc == null || f.RemoveFunc.Count == 0
                     || f.MoveFunc == null || f.MoveFunc.Count == 0)) return true;
             if (it.TryGetValue(Id, out var i) && i != null
-                && (i.Icon != IconTex || i.WebIcon != IconWebMat)) return true;
+                && (i.Icon != IconNow || i.WebIcon != IconWebNow)) return true;
             return false;
         }
         catch { return false; }
@@ -655,8 +739,8 @@ internal static class ArrowTower
     }
 
     /// <summary>包裹物品行：结构照抄 26004 电锯包裹，仅覆盖 ID/名称/描述/TargetFurnitureID；
-    /// Icon/WebIcon=木板图标（F6，2026-10-31 playtest 作者不满电锯图标后改借官方材料 20106 同款）、
-    /// Model 复用电锯包裹纸盒（spec §4.2 一期裁定）。</summary>
+    /// Icon/WebIcon=专属图标（wave8，WebUI/Res 磁盘通道；落盘失败退 F6 木板同款——2026-10-31 playtest
+    /// 作者不满电锯图标后先借官方材料 20106 过渡）、Model 复用电锯包裹纸盒（spec §4.2 一期裁定）。</summary>
     private static void InjectPackageItem(Il2CppSystem.Collections.Generic.Dictionary<int, GameCore.HotUpdate.Config_Item> it)
     {
         GameCore.HotUpdate.Config_Item i;
@@ -699,7 +783,7 @@ internal static class ArrowTower
         i.IT_Discovery_Exp = 0;
         i.CaptureExp = 0;
         i.ItemFmodPath = "";
-        i.Icon = IconTex; i.WebIcon = IconWebMat;           // F6：木板图标（与四件套区分；手绘专属图标=后续美术工作）
+        i.Icon = IconNow; i.WebIcon = IconWebNow;           // wave8：落盘成功=专属图标，失败=F6 木板退路（EnsureIconFile 判路；旧行靠哨兵差异自动补拍）
         i.Model = PackageModel;
         i.ConditionSetId = 0;
         i.IsHighDemand = false;

@@ -44,6 +44,8 @@
 | Plans.ExtendScavengePlans | true | 注入 11 条拾遗扩展规划（超市·六~十/医院·三~五/学校·三~五，D100-D300） |
 | Plans.RichnessStep | 0.3 | 数量层每张已购新卡的期望份数加成（在官方"探索物资"难度档位之上叠加；0=纯官方难度） |
 
+**图标文件说明**：mod 会在 `SurvivalLog_Data\StreamingAssets\WebUI\Res\Icon\` 写入 `eg_arrow_tower.png`（约 3KB，箭塔包裹专属图标；新增文件，不改动任何现有游戏文件；卸载后残留一个 3KB 无害 png，可手删；目录缺失或写入失败自动退回官方木板图标）。
+
 ## 六、English
 
 **Endless Guard** — Endless mode never falls: block all new falls, revive fallen trade points/expedition maps, clear the fall countdowns, plus 11 late-game scavenge plans.
