@@ -44,8 +44,12 @@ internal static class ArrowTower
     private const int DefenseLvKey = 4;                       // 工事技师档（与电锯 403 同档解锁）
     private const string Lv4AppendText = "\\n新增：解锁 箭塔";  // 现场格式为字面 \n 两字符（gamekb dump 实证），同款追加
     private const int ChainsawUnpackAction = 100026004;       // 官方拆封动作（复用，见类头裁定）
-    private const string IconTex = "Assets/RuntimeAssets/Texture/Furniture/UI_Item_Icon_Furnit_M_831300316";      // 电锯图标（一期复用）
-    private const string IconWeb = "../../Res/Furniture/UI_Item_Icon_Furnit_M_831300316.png";
+    // F6 图标（2026-10-31 playtest：包裹图标=电锯图标，作者不满）：改借官方材料「木板」20106 的图标
+    //（gamekb Config_Item 20106 逐字实测），与四件套设备图标全部区分。手绘箭塔专属图标=后续美术工作
+    //（游戏 item 表零弓/弩/箭类物品可借——全表检索实证，木板是现成图标里区分度最高的一张）。
+    private const string IconTex = "Assets/RuntimeAssets/Texture/Material/UI_Item_Icon_Mat_M_muban";              // 木板图标（F6）
+    private const string IconWebMat = "../../Res/Material/UI_Item_Icon_Mat_M_muban.png";                          // 木板 web 图标（20106 同款）
+    private const string IconWeb = "../../Res/Furniture/UI_Item_Icon_Furnit_M_831300316.png";                     // 家具行 ICON 维持电锯（F6 只改物品行）
     private const string PackageModel = "Assets/RuntimeAssets/Prefabs/Furniture/P_Paperbox_009_S1_M02";           // 与 26004 同款纸盒
 
     /// <summary>GuardTicker 2s 巡检入口（照抄 ScavengePlans.OnConfigStep：总开关下再挂本功能开关；
@@ -66,16 +70,37 @@ internal static class ArrowTower
         // 哨兵复查（Plans[0] 模式）：官方重试/换语言重跑 Initialize 会整体重建 _Config_*_Dict——
         // 四表任一丢 99005 或 Lv4 丢解锁项即全量重放（Inject 内部逐行 ContainsKey/Contains 幂等，重放无副作用）
         bool rowsMissing = !td.ContainsKey(Id) || !fu.ContainsKey(Id) || !it.ContainsKey(Id) || !pl.ContainsKey(Id);
+        bool legacyNeedsSync = !rowsMissing && LegacyRowNeedsSync(fu, it);   // F1/F6：旧版建行缺新字段 → 视同缺行重放补齐
         bool lv4Missing = !dl.TryGetValue(DefenseLvKey, out var lv4) || lv4 == null || !Contains(lv4.unlock_recipes, Id);
-        if (!rowsMissing && !lv4Missing)
+        if (!rowsMissing && !legacyNeedsSync && !lv4Missing)
         {
-            ArrowTowerModel.EnsureRegistered();   // 表齐后的稳态轮挂模型注册（幂等，建一次+核验补丁；T7）
+            ArrowTowerModel.Arm();                // F2：只武装不建——模板推迟到首次 supply（场景内、设备在场）再拼
             ArrowTowerFx.EnsureStarted();         // 表稳态懒建动画/弹道 ticker（门=ArrowTowerEnabled，裁决见 ArrowTowerFx 类头；T8）
             return;
         }
         Inject(td, fu, it, pl, dl);
-        ArrowTowerModel.EnsureRegistered();       // 注入完成轮同样尝试（幂等；模板尚未建成功时提前一轮）
+        ArrowTowerModel.Arm();                    // F2：注入完成轮同样武装（模板仍等首次 supply）
         ArrowTowerFx.EnsureStarted();
+    }
+
+    /// <summary>F1/F6 旧版建行探测（行在我方 99005 上，只有本 mod 会建此 id）：①家具行
+    /// RemoveFunc/MoveFunc 空（老 DLL 建的行，缺它们=塔无法卸载/搬动，官方 36004 同款 [299]/[1608]）；
+    /// ②物品行 Icon/WebIcon 不是当前定版图标（F6：老行还挂电锯图标）→ 视同缺行触发 Inject 重放；
+    /// Inject 内逐字段无条件拍平即幂等补齐。异常=false（哨兵不因探测病态空转）。</summary>
+    private static bool LegacyRowNeedsSync(
+        Il2CppSystem.Collections.Generic.Dictionary<int, GameCore.HotUpdate.Config_Furniture> fu,
+        Il2CppSystem.Collections.Generic.Dictionary<int, GameCore.HotUpdate.Config_Item> it)
+    {
+        try
+        {
+            if (fu.TryGetValue(Id, out var f) && f != null && f.ResName == ResName
+                && (f.RemoveFunc == null || f.RemoveFunc.Count == 0
+                    || f.MoveFunc == null || f.MoveFunc.Count == 0)) return true;
+            if (it.TryGetValue(Id, out var i) && i != null
+                && (i.Icon != IconTex || i.WebIcon != IconWebMat)) return true;
+            return false;
+        }
+        catch { return false; }
     }
 
     /// <summary>注入/修复四行 + Lv4 登记。行级幂等：行已存在则跳过建行仅无条件拍平显示/数值字段
@@ -191,10 +216,23 @@ internal static class ArrowTower
         f.RotSourceSubCategory = L();
         f.BagAcceptCategory = 0;
         f.RobotPlayerID = 0;
+        // F1 运行时自证：playtest（2026-10-31）报不可卸载/搬动时建行代码其实已含 [299]/[1608]
+        //（实测部署 DLL 与本仓 Release 逐字节一致），故留一行行内容实证——下轮实机若仍不可卸载，
+        // 可据此排除"行缺字段"，转向查官方消费方（func 查找表建在我们注入之前？）。
+        EndlessGuardPlugin.Trace("[Tower] furniture row funcs remove=" + SafeCount(f.RemoveFunc)
+                                 + " move=" + SafeCount(f.MoveFunc) + " func=" + SafeCount(f.FurnitureFunc));
+    }
+
+    /// <summary>il2cpp List 计数（null/病态=-1，取证行不因探测炸）。</summary>
+    private static int SafeCount(Il2CppSystem.Collections.Generic.List<int> l)
+    {
+        try { return l != null ? l.Count : -1; }
+        catch { return -1; }
     }
 
     /// <summary>包裹物品行：结构照抄 26004 电锯包裹，仅覆盖 ID/名称/描述/TargetFurnitureID；
-    /// Icon/Model 复用电锯包裹（同款纸盒+电锯图标，spec §4.2 一期复用裁定）。</summary>
+    /// Icon/WebIcon=木板图标（F6，2026-10-31 playtest 作者不满电锯图标后改借官方材料 20106 同款）、
+    /// Model 复用电锯包裹纸盒（spec §4.2 一期裁定）。</summary>
     private static void InjectPackageItem(Il2CppSystem.Collections.Generic.Dictionary<int, GameCore.HotUpdate.Config_Item> it)
     {
         GameCore.HotUpdate.Config_Item i;
@@ -237,7 +275,7 @@ internal static class ArrowTower
         i.IT_Discovery_Exp = 0;
         i.CaptureExp = 0;
         i.ItemFmodPath = "";
-        i.Icon = IconTex; i.WebIcon = IconWeb;              // 电锯图标复用（spec §4.2）
+        i.Icon = IconTex; i.WebIcon = IconWebMat;           // F6：木板图标（与四件套区分；手绘专属图标=后续美术工作）
         i.Model = PackageModel;
         i.ConditionSetId = 0;
         i.IsHighDemand = false;

@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using GameCore.HotUpdate;                 // Furniture / BaseSingleton（F2 场景内设备材质克隆）
+using GameCore.HotUpdate.Battle.Logic;    // BattleLogicWorld / TransformComponent（F2）
 using HarmonyLib;
 using Il2CppInterop.Runtime;
 using UnityEngine;
@@ -11,8 +13,13 @@ namespace SurvivalLog.EndlessGuard;
 /// <summary>
 /// 箭塔程序化模型（spec §4.3 v2 精致版，作者 2026-10-30 定案）：内存拼装木质望塔 prefab，
 /// 注册名 = 家具行 ResName「P_Tripo05」（Task 6 注入），总高 ≈1.9、占地 1×1（=游戏 1 格）。
-/// 零外部资产/零 AssetBundle/零许可；材质运行时取得（克隆已放置设备 renderer 的 URP 材质改色，
-/// 不可达则 Shader.Find URP SimpleLit 兜底，再兜 Sprites/Default——三级降级链，见 MakeBaseMaterial）。
+/// 零外部资产/零 AssetBundle/零许可；材质运行时取得（四级降级链，见 MakeBaseMaterial）。
+/// F2（2026-10-31 playtest 实证后改版）：模板/材质【懒建】——OnStep 只 Arm 旗标，首次 supply
+///（场景内、设备在场）才 BuildTemplate：菜单期建模板时 FindObjectOfType&lt;Renderer&gt;()=空、
+/// IL2CPP 下 URP Shader.Find=null，全塔落 Sprites/Default（"木盒子、箭看不见"的根因）。
+/// 已建塔若仍是兜底材质，EnsureGoodMaterial 在每次供给时刻再试升级（设备克隆优先）。
+/// F3：每次供给测世界高（mesh 8 角点+renderer.bounds 双口径 trace 前 3 次），父链非 1 缩放时
+/// 按比例校根，目标 ≈1.9（±15% 死区）。
 ///
 /// ══ Spike 结论（2026-10-31，对 10-29 现行 build 实测：Il2CppDumper 重跑现行 GameAssembly.dll +
 /// global-metadata.dat 得现行 script.json，Iced（suite/tools/disasm_tool）全链逐条核读）══
@@ -68,14 +75,23 @@ internal static class ArrowTowerModel
     internal static readonly Color ArrowShaft = new Color32(0xc9, 0xb4, 0x8a, 0xff);    // 同上
 
     internal static GameObject Template;                 // 隐藏模板（DontDestroyOnLoad+失活），只 Clone 不直发
-    private static Material _baseMat;                    // 三级降级链产物（见 MakeBaseMaterial）
+    private static Material _baseMat;                    // 三级降级链产物（见 MakeBaseMaterial；F2 可后升级）
     private static readonly Dictionary<Color, Material> Mats = new();
-    private static bool _built, _failTraced, _suppliedTraced;
+    private static bool _built, _armed, _failTraced, _suppliedTraced;
+    private static int _supplyTraced;                    // F3：前 3 次 supply 的缩放/高度自证计数
 
-    // ════════════════════════ 注册（EnsureRegistered + Harmony 补丁）════════════════════════
+    private const float TargetHeight = 1.9f;             // F3：设计总高（spec §4.3），±15% 外才校正
 
-    /// <summary>幂等注册：建一次模板 + 核验三 postfix 是否在挂（ArrowTower.OnStep 2s 巡检调用；
-    /// 失败静默重试（仅首次 trace），成功即稳态零开销）。</summary>
+    // ════════════════════════ 注册（Arm/EnsureRegistered + Harmony 补丁）════════════════════════
+
+    /// <summary>F2 懒建武装：ArrowTower.OnStep 2s 巡检只置旗，实际 BuildTemplate 推迟到首次 supply
+    ///（=场景内、设备在场的时刻）。playtest 2026-10-31 实证：主菜单期建模板时 FindObjectOfType<Renderer>
+    /// 找不到任何 renderer、URP Shader.Find 在 IL2CPP 返 null → 全塔 Sprites/Default（"木盒子"）。
+    /// 建模板本身就是首次 Mat() 消费点——推迟它=材质天然在场景内定级。</summary>
+    internal static void Arm() => _armed = true;
+
+    /// <summary>幂等注册：建一次模板 + 核验三 postfix 是否在挂（调用点=①supply 路径首次 miss（F2 懒建）
+    /// ②ArrowTowerFx.BuildArrowTemplate 兜底）。失败静默重试（仅首次 trace），成功即一次性 trace。</summary>
     internal static void EnsureRegistered()
     {
         if (_built) return;
@@ -94,7 +110,7 @@ internal static class ArrowTowerModel
             if (!_failTraced)
             {
                 _failTraced = true;
-                EndlessGuardPlugin.Trace("[Tower] EnsureRegistered: " + e.Message + "（下轮重试）");
+                EndlessGuardPlugin.Trace("[Tower] EnsureRegistered: " + e.Message + "（下次 supply 重试）");
             }
         }
     }
@@ -183,7 +199,9 @@ internal static class ArrowTowerModel
     }
 
     /// <summary>补发核心：仅当 path 命中箭塔名且原结果为 null（=官方缓存/资源双 miss，disasm 实证
-    /// 此态返 null 不抛）时，Instantiate 模板并镜像官方命中路径的后处理。任何异常→原样放行官方值。</summary>
+    /// 此态返 null 不抛）时，Instantiate 模板并镜像官方命中路径的后处理。任何异常→原样放行官方值。
+    /// F2：模板在此（首次 miss=场景内）才懒建（门=_armed，ArrowTower.OnStep 置位）；
+    /// F3：供给后测高自证，父链非 1 缩放把世界高校回 ≈1.9。</summary>
     private static GameObject Supply(string path, GameObject fallback, GameObject root, bool worldStays,
         Vector3? localPos, Vector3? localEuler, Vector3? localScale)
     {
@@ -195,8 +213,12 @@ internal static class ArrowTowerModel
             if (EndlessGuardPlugin.Enabled != null && !EndlessGuardPlugin.Enabled.Value) return fallback;
             if (EndlessGuardPlugin.ArrowTowerEnabled != null && !EndlessGuardPlugin.ArrowTowerEnabled.Value)
                 return fallback;
-            if (!_built) EnsureRegistered();
-            if (Template == null) return fallback;
+            if (!_built)
+            {
+                if (_armed) EnsureRegistered();       // F2 懒建：首次 miss 才拼模板（材质同刻在场景内定级）
+                if (Template == null) return fallback;
+            }
+            EnsureGoodMaterial();                     // F2：基材质若仍是兜底（非 URP），借本场景时刻再升一级
 
             var instObj = Object.Instantiate(Template);
             inst = instObj == null ? null : instObj.TryCast<GameObject>();
@@ -208,6 +230,7 @@ internal static class ArrowTowerModel
                 if (localPos.HasValue) inst.transform.localPosition = localPos.Value;       // 重载2 镜像
                 if (localEuler.HasValue) inst.transform.localEulerAngles = localEuler.Value;
                 if (localScale.HasValue) inst.transform.localScale = localScale.Value;
+                CompensateScale(inst);                                       // F3：世界高校正（±15% 外才动）
             }
             if (!_suppliedTraced)
             {
@@ -217,6 +240,14 @@ internal static class ArrowTowerModel
                 EndlessGuardPlugin.Trace("[Tower] model supplied on first miss: " + path
                                          + " instanceID=" + inst.GetInstanceID());
             }
+            if (_supplyTraced < 3)                 // F3 自证（前 3 次）：根链 lossyScale + 实测世界高
+            {
+                _supplyTraced++;
+                EndlessGuardPlugin.Trace("[Tower] supplied scale=" + inst.transform.lossyScale
+                                         + " rendererH=" + RendererHeight(inst).ToString("0.00")
+                                         + " meshH=" + MeshHeight(inst).ToString("0.00")
+                                         + " (目标≈" + TargetHeight.ToString("0.0") + ")");
+            }
             return inst;
         }
         catch (Exception e)
@@ -225,6 +256,139 @@ internal static class ArrowTowerModel
             EndlessGuardPlugin.Trace("[Tower] supply: " + e.Message);
             return fallback;
         }
+    }
+
+    // ══════════════════════════ F3 高度自证/校正 ══════════════════════════
+
+    /// <summary>世界高校正（F3）：实测塔总高偏离目标 1.9 超 ±15% 时按比例缩根（父链 lossyScale≠1 的
+    /// 兜底补偿；正常链 = 恒等无写）。实测优先 mesh 包围盒 8 角点世界变换（确定性、不依赖引擎剔除态），
+    /// 退化用 renderer.bounds。调整后前 3 次 trace 自证。</summary>
+    private static void CompensateScale(GameObject inst)
+    {
+        try
+        {
+            var h = MeshHeight(inst);
+            if (h <= 0.01f) h = RendererHeight(inst);
+            if (h <= 0.01f) return;                                // 量不到不动（宁高勿矮的错误补偿）
+            if (Math.Abs(h - TargetHeight) <= TargetHeight * 0.15f) return;
+            var k = TargetHeight / h;
+            var ls = inst.transform.localScale;
+            inst.transform.localScale = new Vector3(ls.x * k, ls.y * k, ls.z * k);
+            if (_supplyTraced < 3)
+                EndlessGuardPlugin.Trace("[Tower] scale compensated ×" + k.ToString("0.###")
+                                         + " height " + h.ToString("0.00") + "→" + MeshHeight(inst).ToString("0.00"));
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] scale: " + e.Message); }
+    }
+
+    /// <summary>mesh 包围盒估高（F3）：全部 MeshFilter 的 sharedMesh.bounds 8 角点经 localToWorldMatrix
+    /// 变换取 y 极差——不依赖 renderer.bounds 的剔除/可见性懒更新，新建未渲染帧也可测。</summary>
+    private static float MeshHeight(GameObject go)
+    {
+        try
+        {
+            var filters = go.GetComponentsInChildren<MeshFilter>();
+            var min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+            var max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+            var any = false;
+            foreach (var mf in filters)
+            {
+                if (mf == null) continue;
+                var mesh = mf.sharedMesh;
+                if (mesh == null) continue;
+                var b = mesh.bounds;
+                var tr = mf.transform;
+                for (int i = 0; i < 8; i++)
+                {
+                    var corner = tr.TransformPoint(new Vector3(
+                        (i & 1) == 0 ? b.min.x : b.max.x,
+                        (i & 2) == 0 ? b.min.y : b.max.y,
+                        (i & 4) == 0 ? b.min.z : b.max.z));
+                    min = Vector3.Min(min, corner);
+                    max = Vector3.Max(max, corner);
+                }
+                any = true;
+            }
+            return any ? max.y - min.y : 0f;
+        }
+        catch { return 0f; }
+    }
+
+    /// <summary>renderer.bounds 估高（F3 trace 口径；无有效 bounds=0）。</summary>
+    private static float RendererHeight(GameObject go)
+    {
+        try
+        {
+            var rs = go.GetComponentsInChildren<Renderer>();
+            float min = float.MaxValue, max = float.MinValue;
+            foreach (var r in rs)
+            {
+                if (r == null) continue;
+                var b = r.bounds;
+                if (b.size.y <= 0f) continue;
+                min = Math.Min(min, b.min.y);
+                max = Math.Max(max, b.max.y);
+            }
+            return max > min ? max - min : 0f;
+        }
+        catch { return 0f; }
+    }
+
+    // ══════════════════════════ F2 材质升级（场景内再定级）══════════════════════════
+
+    /// <summary>基材质升级（F2）：当前基材质已 URP=直返（稳态零开销）；仍非 URP（首建时全链兜底
+    /// 都失败的遗留态）则按 MakeBaseMaterial 降级链再试一次，只有真升到 URP 才收货——清逐色缓存、
+    /// 重染模板、毁箭矢模板（下支箭用新材质重建）、重染已放置塔（ArrowTowerFx 根注册表）。</summary>
+    private static void EnsureGoodMaterial()
+    {
+        if (_baseMat != null && IsUrpShader(_baseMat.shader)) return;
+        try
+        {
+            var better = MakeBaseMaterial();
+            if (better == null) return;
+            if (!IsUrpShader(better.shader))
+            {
+                Object.Destroy(better);               // 升不动=丢弃这次试产的兜底材质（防每次 supply 泄一份）
+                return;                               // 维持旧底（防重建抖动）
+            }
+            _baseMat = better;
+            Mats.Clear();                             // 逐色缓存全部作废（Retint 按 OldMat 色值经 Mat() 重建=新底）
+            if (Template != null) RetintDescendants(Template.transform);
+            try { ArrowTowerFx.RetintRootsAndResetArrowTemplate(); }
+            catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] retint roots: " + e.Message); }
+            EndlessGuardPlugin.Trace("[Tower] material upgraded in-scene: " + better.shader.name);
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] material upgrade: " + e.Message); }
+    }
+
+    private static bool IsUrpShader(Shader sh) =>
+        sh != null && sh.name.IndexOf("Universal Render Pipeline", StringComparison.OrdinalIgnoreCase) >= 0;
+
+    /// <summary>重染后代（F2 升级路径）：每 renderer 的旧材质读回色值 → Mat(色) 从新底重建并回挂。
+    /// Template 与已放置塔根共用（结构件材质全走 Mats 缓存这一条路）。internal=ArrowTowerFx 回调重染已放置塔。</summary>
+    internal static void RetintDescendants(Transform t)
+    {
+        for (int i = 0; i < t.childCount; i++)
+        {
+            var c = t.GetChild(i);
+            if (c == null) continue;
+            var r = c.GetComponent<MeshRenderer>();
+            if (r != null && r.sharedMaterial != null)
+                r.sharedMaterial = Mat(ColorOf(r.sharedMaterial));
+            RetintDescendants(c);
+        }
+    }
+
+    /// <summary>从结构件旧材质读回色值（_BaseColor 优先，退 _Color，再退白）。</summary>
+    private static Color ColorOf(Material m)
+    {
+        try
+        {
+            if (m.HasProperty("_BaseColor")) return m.GetColor("_BaseColor");
+            if (m.HasProperty("_Color")) return m.GetColor("_Color");
+        }
+        catch { }
+        return Color.white;
     }
 
     // ══════════════════════════════ 模板拼装（spec §4.3 结构件清单）═════════════════════════════
@@ -457,35 +621,122 @@ internal static class ArrowTowerModel
         return mat;
     }
 
-    /// <summary>底材质：①已放置设备 renderer 的 URP 材质克隆（画风自动匹配）→ ②Shader.Find
-    /// URP SimpleLit → ③Sprites/Default（内置必在，_Color 染色）。实机建模板时战斗场景已加载，
-    /// 一般走①或②；菜单期先建则②兜住。</summary>
+    /// <summary>底材质四级降级链（F2 改版，2026-10-31 playtest 实证旧②在 IL2CPP 全空）：
+    /// ①场景内已放置受追踪设备的 renderer 材质克隆（供给时刻设备必在场——AgentManager 直达，
+    ///画风自动匹配）→ ②场景任意 URP renderer（FindObjectOfType，战斗场景 3D 物体兜住）→
+    /// ③Shader.Find 链（SimpleLit→Lit；IL2CPP 加密 bundle 下常 null，仅留作兜）→
+    /// ④Sprites/Default（内置必在，_Color 染色）。每级 trace 命中路径与 shader 名。</summary>
     private static Material MakeBaseMaterial()
     {
+        // ① 已放置设备克隆（F2 核心）：迭代在场受追踪家具 → TransformComponent.transform 后代
+        //    第一个 URP+_BaseColor renderer → 克隆去贴图/强不透明
+        try
+        {
+            if (GameCore.HotUpdate.BaseSingleton<BattleLogicWorld>.IsInstanceCreated)
+            {
+                var all = GameCore.HotUpdate.BaseSingleton<BattleLogicWorld>.Instance?._AgentManager?.GetAllAgent();
+                if (all != null)
+                {
+                    for (int i = 0; i < all.Count; i++)
+                    {
+                        Furniture f = null;
+                        try
+                        {
+                            var a = all[i];
+                            if (a == null || a.IsDead) continue;
+                            f = a.TryCast<Furniture>();
+                        }
+                        catch { continue; }   // 单代理病态不拖垮取材
+                        if (f == null || !DeviceXpMath.IsTrackedDevice(f.AgentConfigId)) continue;
+                        var r = FirstUrpRenderer(TransformOf(f)?.transform);
+                        if (r == null) continue;
+                        var m = CloneStripped(r.sharedMaterial);
+                        EndlessGuardPlugin.Trace("[Tower] material cloned from placed device cfg=" + f.AgentConfigId
+                                                 + " shader=" + r.sharedMaterial.shader.name);
+                        return m;
+                    }
+                }
+            }
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] mat device-clone: " + e.Message); }
+
+        // ② 场景任意 URP renderer（旧路径，保留为次级）
         try
         {
             var r = Object.FindObjectOfType(Il2CppType.Of<Renderer>(), false)?.TryCast<Renderer>();
             var src = r != null ? r.sharedMaterial : null;
-            var sh = src != null ? src.shader : null;
-            if (sh != null && sh.name.IndexOf("Universal Render Pipeline", StringComparison.OrdinalIgnoreCase) >= 0
-                && src.HasProperty("_BaseColor"))
+            if (src != null && IsUrpShader(src.shader) && src.HasProperty("_BaseColor"))
             {
-                var m = new Material(src);
-                if (m.HasProperty("_Surface")) m.SetFloat("_Surface", 0f);   // 保险：强制不透明
-                if (m.HasProperty("_BaseMap")) m.SetTexture("_BaseMap", null); // 抹掉源贴图，纯色可染
-                if (m.HasProperty("_MainTex")) m.SetTexture("_MainTex", null);
-                EndlessGuardPlugin.Trace("[Tower] material cloned from scene renderer (shader=" + sh.name + ")");
+                var m = CloneStripped(src);
+                EndlessGuardPlugin.Trace("[Tower] material cloned from scene renderer (shader=" + src.shader.name + ")");
                 return m;
             }
         }
         catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] mat clone fallback: " + e.Message); }
-        var lit = Shader.Find("Universal Render Pipeline/Simple Lit");
-        if (lit != null)
+
+        // ③ Shader.Find 链（IL2CPP 下 URP shader 常不可按名查——加密 bundle，实证多为 null）
+        foreach (var name in new[] { "Universal Render Pipeline/Simple Lit", "Universal Render Pipeline/Lit" })
         {
-            EndlessGuardPlugin.Trace("[Tower] material fallback: URP SimpleLit");
-            return new Material(lit);
+            var sh = Shader.Find(name);
+            if (sh != null)
+            {
+                EndlessGuardPlugin.Trace("[Tower] material fallback: Shader.Find(" + name + ")");
+                return new Material(sh);
+            }
         }
-        EndlessGuardPlugin.Trace("[Tower] material fallback: Sprites/Default（最后兜底）");
+
+        // ④ 最后兜底（内置必在；EnsureGoodMaterial 会在后续供给时刻继续尝试升级）
+        EndlessGuardPlugin.Trace("[Tower] material fallback: Sprites/Default（最后兜底，待场景内升级）");
         return new Material(Shader.Find("Sprites/Default"));
+    }
+
+    /// <summary>克隆源材质并抹成可染纯色：强不透明（_Surface=0）+ 抹 _BaseMap/_MainTex。</summary>
+    private static Material CloneStripped(Material src)
+    {
+        var m = new Material(src);
+        if (m.HasProperty("_Surface")) m.SetFloat("_Surface", 0f);     // 保险：强制不透明
+        if (m.HasProperty("_BaseMap")) m.SetTexture("_BaseMap", null); // 抹掉源贴图，纯色可染
+        if (m.HasProperty("_MainTex")) m.SetTexture("_MainTex", null);
+        return m;
+    }
+
+    /// <summary>受追踪家具的 Unity 根（TransformComponent.transform；组件按 Type 索引直达，
+    /// DeviceXpRuntime.GetComponent 已验证模式）。</summary>
+    private static TransformComponent TransformOf(Furniture f)
+    {
+        try
+        {
+            var dict = f != null ? f.agentComponentDictionary : null;
+            if (dict == null) return null;
+            return dict.TryGetValue(Il2CppType.From(typeof(TransformComponent)), out var raw)
+                ? raw?.TryCast<TransformComponent>() : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>后代第一个 URP+_BaseColor renderer（深度优先；官方家具模型 renderer 挂子物体下）。</summary>
+    private static Renderer FirstUrpRenderer(Transform t)
+    {
+        if (t == null) return null;
+        for (int i = 0; i < t.childCount; i++)
+        {
+            var c = t.GetChild(i);
+            if (c == null) continue;
+            Renderer r = null;
+            try
+            {
+                r = c.GetComponent<Renderer>();
+                if (r != null)
+                {
+                    var sm = r.sharedMaterial;
+                    if (sm == null || !IsUrpShader(sm.shader) || !sm.HasProperty("_BaseColor")) r = null;
+                }
+            }
+            catch { r = null; }
+            if (r != null) return r;
+            var sub = FirstUrpRenderer(c);
+            if (sub != null) return sub;
+        }
+        return null;
     }
 }

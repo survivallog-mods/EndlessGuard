@@ -305,6 +305,24 @@ internal sealed class ArrowTowerFx : MonoBehaviour
         if (!Towers.ContainsKey(furnitureId)) Towers[furnitureId] = new TowerFx { Id = furnitureId };
     }
 
+    /// <summary>F2 材质升级回调（ArrowTowerModel.EnsureGoodMaterial 调用）：①毁箭矢模板（下支箭经
+    /// ArrowTowerModel.Mats 缓存用升级后材质重建——模板若早于材质升级建成，旧 Sprites/Default 材质
+    /// 会一直沿用）；②重染已放置塔（其 renderer 挂的是旧逐色缓存材质，清缓存后须回挂新材质）。</summary>
+    internal static void RetintRootsAndResetArrowTemplate()
+    {
+        if (_arrowTemplate != null)
+        {
+            Object.Destroy(_arrowTemplate);
+            _arrowTemplate = null;
+        }
+        foreach (var kv in Towers)
+        {
+            var root = kv.Value != null ? kv.Value.Root : null;
+            if (root == null) continue;                       // 未解析/兜底盒态：无我方 renderer 可染
+            ArrowTowerModel.RetintDescendants(root);
+        }
+    }
+
     /// <summary>⑥ 脉冲转投（DeviceXpRuntime.RenderPulse 排水调用；elapsed 补偿排水延迟，过期丢）。</summary>
     internal static void NotePulse(long ownerId, float elapsed)
     {
@@ -338,8 +356,10 @@ internal sealed class ArrowTowerFx : MonoBehaviour
         Arrows.Add(new ArrowFx { Tr = tr, TargetId = targetId, LastKnown = t.LastKnown, Age = 0f });
     }
 
-    /// <summary>箭矢模板懒建（首次派箭一次）：克隆 ArrowTowerModel 结构件/色板/材质三级降级链，
-    /// 沿 +z 朝前（tr.rotation=LookRotation 直用）；比例=塔载上膛箭（spec §4.3：杆 0.26+锥头+双羽）。</summary>
+    /// <summary>箭矢模板懒建（首次派箭一次）：克隆 ArrowTowerModel 结构件/色板/材质（全走 ArrowTowerModel.
+    /// Mat 缓存=与塔体同一条四级降级链，F2 裁定：不私建材质；模板早于材质升级建成的旧态由
+    /// RetintRootsAndResetArrowTemplate 毁掉重建），沿 +z 朝前（tr.rotation=LookRotation 直用）；
+    /// 比例=塔载上膛箭（spec §4.3：杆 0.26+锥头+双羽）。</summary>
     private static bool BuildArrowTemplate()
     {
         GameObject t = null;
