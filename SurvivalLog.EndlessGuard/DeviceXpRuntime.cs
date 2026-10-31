@@ -11,48 +11,56 @@ namespace SurvivalLog.EndlessGuard;
 
 /// <summary>
 /// 防御设备经验运行时（Task 3；spec docs/superpowers/specs/2026-10-30-defense-upgrade-arrowtower-design.md §3.4/§3.6）：
-/// 六锚点 Harmony 补丁（TakeDamage/FireDevice/ApplyZombieBite/HitZombieByWreck + F4 粘性回贴
-/// TowerDeviceComponent.OnInit 与 FurnitureDurabilityComponent.Initialize——官方重快照源头当场
-/// 复贴等级值，2026-10-31 playtest"升级被反复还原"的根治）+ 入账 Award + 升级生效 ApplyLevel。
+/// 四锚点 Harmony 补丁（TakeDamage/FireDevice/ApplyZombieBite/HitZombieByWreck，全部只读观测）+ 入账 Award + 升级生效 ApplyLevel。
 /// 挂载走 EndlessGuardPlugin.Load 的逐类自动装配（每个 [HarmonyPatch] 嵌套类独立异常隔离），本类不自建 Harmony 实例。
 ///
-/// ===== Step-1 反汇编/interop 实证（mdump 实测 interop HotUpdate.dll 2026-10-23_26157732 + gamekb dump.cs，Task 3 复核）=====
+/// ===== fixwave2 架构重写（2026-10-31 作者裁定"两个动作不应该来回覆写"，playtest 实证旧路线三病症：
+/// 设备批量掉血[官方 Initialize 钳制 320→200 表现为伤害]/升级属性来回拍/222 条 recal+sticky 刷屏）=====
+/// **升级=换配置行。官方代码是组件值的唯一写入者；本 mod 只改"官方读哪一行配置"。**
+/// - 派生等级行（99112..99155，方案见 DeviceXpMath）由 ArrowTower.InjectDerivedRows 建好；
+/// - ApplyLevel 唯一动作 = f.AgentConfigId 换到派生行 + 官方重初始化（TowerDeviceComponent.OnInit(行号) /
+///   FurnitureDurabilityComponent.Initialize(满,满)）让数值当场生效——零组件属性直写、零 AddMaxDurability；
+/// - 官方随后的任意重快照（读档/修理/重入）天然读的是同一行配置 → 无需粘性回贴、无需对账追赶
+///   （旧 F4 双粘性 postfix 与 2s recal 追赶整链删除，RecalFuse 熔断器随之退役）；
+/// - OnStep 只留轻量正确性巡检：AgentConfigId ≠ 账本等级对应的行号时（升级发生于设备不在场/读档残留
+///   等带外情况）才补一次换行重初始化——只在不一致时写，幂等稳态零写零 trace；
+/// - 受击减伤不再由 TakeDamage 前缀缩放（已删），改由派生行 Config_TowerDevice.SelfDamagePerBite 承载
+///   （按等级缩放；官方四件套该值全 0 → 维持 0，箭塔 1.0 系数维持 0——缩放公式在行上，见 ArrowTower）；
+///   TakeDamage 前缀退化为只读快照 hpBefore（供后缀算实际掉血入账），后缀零写组件。
+///
+/// ===== Step-1 反汇编/interop 实证（mdump 实测 interop HotUpdate.dll 2026-10-23_26157732 + gamekb dump.cs，fixwave2 复核）=====
 /// ① 锚点签名（全部单重载，interop 方法全公开，Harmony 可直接挂）：
 ///   - FurnitureDurabilityComponent.TakeDamage : Void (Int32 damage, Boolean isRepair=False, String deathCauseKey, Boolean bypassShield=False)
-///     —— 参数名逐字来自 dump.cs；damage 经 ref 入参写回实现减免（HarmonyX il2cpp 装配支持值类型 ref 写回）。
+///     —— 参数名逐字来自 dump.cs。
 ///   - TowerCombatManager.FireDevice : Void (Furniture furniture, TowerDeviceComponent device,
 ///     Il2CppSystem.Collections.Generic.IReadOnlyList`1&lt;Int64&gt; aliveIds)（原私有；目标 HP 快照口径=AgentManager.GetAgent(id)→Zombie.CurrentHP）。
 ///   - TowerCombatManager.ApplyZombieBite : Void (Zombie zombie)（公开；受咬设备经 zombie.AssignedTargetId → GetAgent → Furniture 解析）。
 ///   - TowerCombatManager.HitZombieByWreck : Void (Furniture furniture, Zombie zombie, Int32 damage, Boolean isFirstHit)（原私有）。
 /// ② 组件→属主：BaseComponent.ownerInstanceId(long 公开 get) → BaseSingleton&lt;BattleLogicWorld&gt;.Instance._AgentManager
-///   （interop 公开 getter，FallRestorer._TagManager 同款已验证模式）→ AgentManager.GetAgent(long) → TryCast&lt;Furniture&gt;()，
-///   Furniture.AgentConfigId(int)=家具配置 id（BaseAgent 继承）。组件按 Type 索引直达：agentComponentDictionary[
-///   Il2CppType.From(typeof(T))]（CabinetCatalog.ReadTagIds 已验证模式，无泛型/枚举坑）。
-/// ②b 在场枚举（Task 4 实证）：AgentManager : BaseEntity 非 BaseSingleton（dump.cs 374312 行），属主仍是
-///   BattleLogicWorld._AgentManager（同上公开 getter）→ GetAllAgent():Il2CppList&lt;BaseAgent&gt;（interop 公开无参，
-///   mdump 实测）→ 过滤 BaseAgent.IsDead → TryCast&lt;Furniture&gt; → AgentConfigId ∈ IsTrackedDevice。
-/// ③ 数值：Zombie.CurrentHP/MaxHP(int 公开)、BaseEntity.InstanceId(long 公开)、TowerDeviceComponent.Attack/
-///   AttackIntervalSeconds/AttackRangeSqr get+set 公开、FurnitureDurabilityComponent.CurrentDurability/MaxDurability 公开、
-///   AddMaxDurability/AddCurrentDurability(Void(Int32))。
-/// ④ 存档标识：interop GameSaveManager 无字面 SaveFileName 成员；同型成员=GetLastPlayFileName():String（公开，
-///   GameSaveManager : BaseSingleton&lt;GameSaveManager&gt;）→ SlotKey；不可达/空 → "default"（裁决兜底，Task 4 复核）。
+///   → AgentManager.GetAgent(long) → TryCast&lt;Furniture&gt;()。组件按 Type 索引直达：agentComponentDictionary[
+///   Il2CppType.From(typeof(T))]（CabinetCatalog.ReadTagIds 已验证模式）。
+/// ②b 在场枚举：BattleLogicWorld._AgentManager.GetAllAgent():Il2CppList&lt;BaseAgent&gt;（interop 公开无参，
+///   mdump 实测）→ 过滤 IsDead → TryCast&lt;Furniture&gt; → IsTrackedDevice（含派生行）。
+/// ③ 换行重初始化（fixwave2 复核 mdump）：BaseAgent.AgentConfigId get+set 公开（save 由游戏自己的存档
+///   系统按 AgentConfigId 走，非本 mod 写存档文件）；TowerDeviceComponent.OnInit(Int32) 公开（攻击面板
+///   按配置行重快照）；FurnitureDurabilityComponent.Initialize(Int32,Int32) 公开（耐久重快照）；
+///   ConfigManager.Get_Config_Furniture(id).FurnitureHPMax 公开（派生行耐久上限读取）。
+/// ④ 存档标识：GameSaveManager.GetLastPlayFileName():String（公开）→ SlotKey；不可达/空 → "default"。
 ///
-/// 边界与让步（已知、可接受，Task 4/9 复核）：
-/// - 基线快照按裁决"首见即拍"：首次 ApplyLevel 前拍 Attack/Interval/RangeSqr/MaxDurability 为基线。跨会话
-///   （存档→读档）升级过的设备若游戏按配置重置了面板值，基线=重置后的原厂值，重放 ApplyLevel 幂等收敛；
-///   MaxDurability 若已含上会话成长则基线偏高（账本只存 {xp,lv} 无基线，spec §6 认可此简化）。
-/// - cellKey=TransformComponent.Position 四舍五入 "x,z"；不可达退化 ownerId 字符串（裁决：Task 4 复核）。
-/// - 材质 emissive 脉冲：Battle.Logic 层拿不到 Renderer 直连，按裁决只记录脉冲起点列表 + RenderPulse()
-///   排水（T8 实装：转投 ArrowTowerFx 逐帧消费，降级表现=Head 缩放脉冲）。
+/// 边界与让步（已知、可接受）：
+/// - 升级满血是语义的一部分（Initialize(满,满)）：升级顺带修满=作者拍板的设计（旧直写路线同款"正增量回满"）。
+/// - 巡检补写（带外升级残留）用 Initialize(min(cur,上限), 上限) 夹取不白送血；升级路径才满血。
+/// - cellKey=TransformComponent.Position 四舍五入 "x,z"；不可达退化 ownerId 字符串。
+/// - 材质 emissive 脉冲：Battle.Logic 层拿不到 Renderer 直连，只记录脉冲起点 + RenderPulse() 排水（T8）。
 /// - XP 数值旋钮（Task 9 实装）：XpMultiplier/SandbagXpRate/KillBonusRatio/XpThresholdScale + 各类成长
-///   步长/系数全部读 cfg Defense.*（spec §3.5；属性直取 ConfigEntry.Value，改值即刻生效、巡检 2s 对账
-///   自动重算已升级设备）；Defense.XPEnabled=false=XpOn() 门整体停用（入账/对账/悬停全停，塔 FX 照走）。
+///   步长/系数全部读 cfg Defense.*；改值后由 ArrowTower 的派生行新鲜度哨兵重建行内容，组件面板在下次
+///   官方重初始化（读档/重放）时吸收新值。
 /// </summary>
 internal static class DeviceXpRuntime
 {
     // ===== XP 数值旋钮（spec §3.5 全表接 cfg，Task 9）：读侧直取 ConfigEntry.Value——cfg 改值即刻生效，
-    // 步长/系数类经 OnStep 巡检对账 2 秒内把已升级设备重算到新目标；cfg 未绑定（异常兜底）回退 spec 默认值。
-    // 属性名与 spec §3.5 键名一一对应，语义注释同 cfg 描述（EndlessGuardPlugin.Load）=====
+    // 派生行内容由 ArrowTower 新鲜度哨兵按这些值重建（组件面板下次官方重初始化吸收）；cfg 未绑定（异常
+    // 兜底）回退 spec 默认值。属性名与 spec §3.5 键名一一对应，语义注释同 cfg 描述（EndlessGuardPlugin.Load）=====
     public static float XpMultiplier => Cfg(EndlessGuardPlugin.XPMultiplier, 1f);       // 开火经验倍率
     public static float SandbagXpRate => Cfg(EndlessGuardPlugin.SandbagXPRate, 2f);     // 沙包(36001)承伤经验倍率（spec §3.1 作者决议）
     public static float KillBonusRatio => Cfg(EndlessGuardPlugin.KillBonusRatio, 0.5f); // 击杀追加比例（spec §3.1）
@@ -66,14 +74,14 @@ internal static class DeviceXpRuntime
     public static float TowerRangeStep => Cfg(EndlessGuardPlugin.TowerRangeStep, 0.55f);         // 箭塔射程每级 +格数
 
     /// <summary>等级上限（cfg Defense.MaxLevel 夹在 [1, 阈值表长度+1=5]；1=关闭成长）。只封顶今后的升级
-    /// ——已超上限设备属性保留不回退（只升不降裁决，账本等级在，调回上限成长自动续上）。</summary>
+    /// ——已超上限设备配置行保留不回退（只升不降裁决，账本等级在，调回上限成长自动续上）。</summary>
     public static int MaxLevel => Math.Min(
         Math.Max(EndlessGuardPlugin.MaxLevel != null ? EndlessGuardPlugin.MaxLevel.Value : 5, 1),
         DeviceXpMath.ThresholdsDefault.Length + 1);
 
     private static float Cfg(ConfigEntry<float> e, float dflt) => e != null ? e.Value : dflt;
 
-    /// <summary>账本脏标记：Award 写入即置位；Task 4 巡检 ticker 消费（flush 后清零）。本任务不落盘。</summary>
+    /// <summary>账本脏标记：Award 写入即置位；巡检 ticker 消费（flush 后清零）。</summary>
     internal static bool _dirty;
 
     /// <summary>当前存档槽标识（设备键第一维）。RefreshSlotKey 刷新；默认 "default"。</summary>
@@ -83,12 +91,13 @@ internal static class DeviceXpRuntime
     /// 托管侧纯 C# 静态事件（il2cpp event interop 有坑，mod 内部自产自消，Task 8 消费）。</summary>
     public static event Action<long, Vector3, long> DeviceFired;
 
-    // ===== 配置按家具 id 派发（spec §3.3/§4.1：武器 36002/36003/36004/99005 攻防成长，沙包 36001 只长血；
-    // 步长/系数 Task 9 接 cfg——箭塔 HP 步长与减伤系数不入 cfg（§3.5 未列），保持 spec §4.1 裁定值）=====
-    private static bool IsWeaponClass(int cfgId) => cfgId == 36002 || cfgId == 36003 || cfgId == 36004 || cfgId == 99005;
-    private static float IncomingFactorFor(int cfgId) =>
+    // ===== 类别判定/成长参数（fixwave2 改 internal：ArrowTower 建派生行时消费同一套口径，杜绝两套算式）=====
+    // spec §3.3/§4.1：武器 36002/36003/36004/99005 攻防成长，沙包 36001 只长血；箭塔 HP 步长与减伤系数
+    // 不入 cfg（§3.5 未列），保持 spec §4.1 裁定值。
+    internal static bool IsWeaponClass(int cfgId) => cfgId == 36002 || cfgId == 36003 || cfgId == 36004 || cfgId == 99005;
+    internal static float IncomingFactorFor(int cfgId) =>
         cfgId == 36001 ? SandbagDefFactor : cfgId == 99005 ? 1.0f : WeaponDefFactor;   // 箭塔 1.0=无减伤成长（裁决）
-    private static float HpStepRatioFor(int cfgId) =>
+    internal static float HpStepRatioFor(int cfgId) =>
         cfgId == 36001 ? SandbagHpStepRatio : cfgId == 99005 ? TowerHpStepRatio : WeaponHpStepRatio;
     private const float TowerHpStepRatio = 0.15f;   // 箭塔耐久步长（spec §4.1 低成长脆皮定位；低血是平衡项，不放 cfg）
     private const int SandbagCfgId = 36001;
@@ -135,57 +144,40 @@ internal static class DeviceXpRuntime
     /// <summary>上一步巡检时见到的存档槽标识（slot 切换检测基线；初值=冷启动 SlotKey，首步不误触发清场）。</summary>
     private static string _stepSlot = SlotKey;
 
-    /// <summary>校准熔断器（评审 I1）：按家具实例 id 一台一份，与基线快照同生命周期（槽切换同清；
-    /// 设备重建/换 id 天然新态）。连续 3 步 recal 未收敛 → 第 4 次起压制该校准写（封死官方钳制
-    /// MaxDurability 时的每 2s 回血循环），halt 行每设备只打一次。</summary>
-    private static readonly Dictionary<long, RecalFuse> Fuses = new();
-
-    private static RecalFuse FuseOf(long ownerId)
-    {
-        if (!Fuses.TryGetValue(ownerId, out var fu) || fu == null) { fu = new RecalFuse(); Fuses[ownerId] = fu; }
-        return fu;
-    }
-
     /// <summary>
-    /// Task 4 巡检入口（GuardTicker 每 2s 调一次，spec §3.6 读档重放+幂等校准）：
-    /// ① RefreshSlotKey 后比对上步值——不同=发生读档/换档 → 清基线快照与校准熔断器（同生命周期）。
-    ///    快照按家具实例 id 键控：换档后 id 集合不同，陈旧条目本是无害垃圾；但同档重进时 id 可能复用，
-    ///    旧基线可能已是"含成长"的值（首次 ApplyLevel 前拍的快照在上一会话早已落袋），清空更安全且只是
-    ///    托管 Dictionary.Clear，开销可忽略。
-    /// ② _dirty → Store.Save() 后清旗（裁决的存档时机设计：入账只置脏，巡检统一落盘，无逐事件磁盘写）；
-    ///    Save 抛异常（磁盘病态）则旗不清，下个 2s 自动重试。
-    /// ③ 重放对账：读档后官方按配置重快照面板值（修理路径同理会回写原厂值），逐台把 live 组件值与
-    ///    "账本等级+基线"算出的目标值比对，有漂移才 ApplyLevel 重放并 trace 一行（spec §3.4 逐字格式，
-    ///    每修正台一行）。幂等：无漂移零写零 trace；重放复用 ApplyLevel（与升级同一写路径，不另起灶）。
-    ///    连续 3 步未收敛的设备由 RecalFuse 熔断压制（评审 I1，防钳制回血循环）。
-    /// 全程 try/catch（单台异常不拖累其余台，轮询容器不炸）。
+    /// 巡检入口（GuardTicker 每 2s 调一次；fixwave2 轻量化：粘性回贴/对账追赶/熔断器全链删除）：
+    /// ① RefreshSlotKey 后比对上步值——不同=发生读档/换档（官方读档已按保存的 AgentConfigId 重初始化，
+    ///    派生行在档=数值原样回来，无需任何追补）。
+    /// ② Defense.ResetLevels 还原模式（卸载前安全网，先于 XP 门——XPEnabled=false 也要能还原）：
+    ///    全部在场受追踪设备换回基础行+官方重初始化+耐久夹回基础上限，清空本槽账本，然后可安全删 dll。
+    /// ③ _dirty → Store.Save() 后清旗；Save 抛异常（磁盘病态）则旗不清，下个 2s 自动重试。
+    /// ④ 轻量正确性巡检：账本等级对应的行号 ≠ 现场 AgentConfigId 才补写（升级发生于设备不在场的带外
+    ///    情况/旧版本残留）；幂等稳态零写零 trace。
+    /// ⑤ 箭塔 FX 注册表喂养（复用本轮 2s 枚举）。
+    /// 全程 try/catch（单台异常不拖累其余台）。
     /// </summary>
     public static void OnStep()
     {
         try
         {
             if (!GateOn()) return;
+            RefreshSlotKey();
+            if (!string.Equals(SlotKey, _stepSlot, StringComparison.Ordinal))
+                _stepSlot = SlotKey;   // 读档/换档：旧粘性/基线状态已随 fixwave2 删除，无需清场
+
+            ResetAllLevelsIfArmed();   // 还原模式（cfg Defense.ResetLevels；未开启=一次布尔比较即出）
+
             if (!XpOn())
             {
-                // Defense.XPEnabled=false：XP 侧（脏账落盘/对账重放）全停（账本冻结不改写）；
+                // Defense.XPEnabled=false：XP 侧（脏账落盘/巡检补写）全停（账本冻结不改写）；
                 // 但箭塔 FX 注册表喂养照走——FX 属塔本体（门=Defense.ArrowTowerEnabled，T8 裁决），
                 // DeviceFired 开火路径同样在喂养，此处只补「从未开过火的塔」的待机动画入口。
                 foreach (var f in DevicesInPlay())
                 {
-                    try { if (f.AgentConfigId == ArrowTower.Id) ArrowTowerFx.NoteTower(f.InstanceId); }
+                    try { if (DeviceXpMath.BaseCfgOf(f.AgentConfigId) == ArrowTowerCfgId) ArrowTowerFx.NoteTower(f.InstanceId); }
                     catch { /* 单台病态不拖垮整轮 */ }
                 }
                 return;
-            }
-
-            // ① slot 上下文失效检测（读档/换档）
-            RefreshSlotKey();
-            if (!string.Equals(SlotKey, _stepSlot, StringComparison.Ordinal))
-            {
-                _stepSlot = SlotKey;
-                Bases.Clear();
-                Fuses.Clear();     // 熔断器与基线同生命周期：换档=新会话，压制态一并复位（评审 I1）
-                StickyTicks.Clear();   // F4 粘性节流戳与基线同生命周期（防陈旧槽时间戳跨会话）
             }
 
             // ② 脏账本落盘冲刷（成功才清旗，失败下步重试）
@@ -195,41 +187,21 @@ internal static class DeviceXpRuntime
                 _dirty = false;
             }
 
-            // ③ 在场设备逐台对账重放（Lv1 无成长可放，账本无条目同）
+            // ④ 轻量正确性巡检（只在行号不一致时写；稳态=每台一次字典查询+int 比较）
             foreach (var f in DevicesInPlay())
             {
                 try
                 {
-                    var cfgId = f.AgentConfigId;
-                    if (cfgId == ArrowTower.Id) ArrowTowerFx.NoteTower(f.InstanceId);   // T8：箭塔 FX 注册表喂养（复用本轮 2s 枚举，免 FX 逐帧 GetAllAgent）
+                    var baseCfg = DeviceXpMath.BaseCfgOf(f.AgentConfigId);
+                    if (baseCfg == ArrowTowerCfgId) ArrowTowerFx.NoteTower(f.InstanceId);   // T8：FX 注册表喂养
                     var cellKey = CellKeyOf(f);
-                    if (!Store.TryGet(SlotKey, cfgId, cellKey, out var e) || e == null || e.Lv <= 1) continue;
-                    var lv = e.Lv;
-                    var ownerId = f.InstanceId;
-                    var tower = GetComponent<TowerDeviceComponent>(f);
-                    var dura = GetComponent<FurnitureDurabilityComponent>(f);
-                    var b = GetOrCaptureBase(ownerId, tower, dura);   // 首见即拍（读档重置后的原厂值恰是合法基线，与 Task 3 让步一致）
-                    if (b == null) continue;
-                    var drifted =
-                        (IsWeaponClass(cfgId) && tower != null && (
-                            DeviceXpMath.AttackDrifts(b.Attack, lv, tower.Attack, WeaponAtkStep) ||
-                            DeviceXpMath.IntervalDrifts(b.Interval, lv, tower.AttackIntervalSeconds, WeaponIntervalStep) ||
-                            (cfgId == ArrowTowerCfgId && DeviceXpMath.RangeDrifts(b.RangeSqr, lv, tower.AttackRangeSqr, TowerRangeStep)))) ||
-                        (dura != null && b.MaxHp > 0 &&
-                            DeviceXpMath.MaxHpDrifts(b.MaxHp, DeviceXpMath.StepAbs(b.MaxHp, HpStepRatioFor(cfgId)), lv, dura.MaxDurability));
-                    var fuse = FuseOf(ownerId);
-                    if (!drifted) { fuse.OnConverged(); continue; }   // 幂等：无漂移零写零 trace（连续计数归零）
-                    if (!fuse.OnTrigger())                            // 熔断中（评审 I1）：本会话压制该校准写——
-                    {                                                 // 防官方钳制 MaxDurability 时每 2s ApplyLevel→AddCurrent 无限回血
-                        if (!fuse.HaltTraced)
-                        {
-                            fuse.HaltTraced = true;
-                            EndlessGuardPlugin.Trace("[XP] recal-halt cfg=" + cfgId + " owner=" + ownerId + " 连续3次未收敛，暂停校准（疑似官方钳制MaxDurability，待实机取证）");
-                        }
-                        continue;
-                    }
-                    ApplyLevel(f, lv);   // 唯一写路径：与升级生效共用
-                    EndlessGuardPlugin.Trace("[XP] recal cfg=" + cfgId + " lv=" + lv);   // spec §3.4 逐字格式
+                    var lv = 1;
+                    if (Store.TryGet(SlotKey, baseCfg, cellKey, out var e) && e != null && e.Lv > 1) lv = Math.Min(e.Lv, MaxLevel);
+                    var expected = DeviceXpMath.RowIdFor(baseCfg, lv);
+                    if (expected < 0 || f.AgentConfigId == expected) continue;   // 幂等：一致零写零 trace
+                    f.AgentConfigId = expected;                                  // 补写=换行（官方值权威，无属性直写）
+                    ReinitFromRow(f, expected, fullHeal: false);                 // 夹取不白送血（升级路径才满血）
+                    EndlessGuardPlugin.Trace("[XP] recal cfg=" + baseCfg + " lv=" + lv + " row=" + expected);
                 }
                 catch (Exception e) { EndlessGuardPlugin.Trace("[XP] recal probe: " + e.Message); }
             }
@@ -237,10 +209,65 @@ internal static class DeviceXpRuntime
         catch (Exception e) { EndlessGuardPlugin.Trace("[XP] step: " + e.Message); }
     }
 
+    /// <summary>Defense.ResetLevels 还原模式（fixwave2 卸载安全网）：派生行随 dll 消失，留档设备的
+    /// AgentConfigId 会指向不存在的行——此开关把存档一次性还原为纯官方状态：全部在场受追踪设备
+    /// AgentConfigId=BaseCfgOf(现场值) + OnInit(基础行) 重快照攻击面板 + 耐久 Initialize(min(cur,基础上限),
+    /// 基础上限)（夹取不回血），并清空本槽账本+落盘。开启状态下每轮巡检都跑（幂等：已在基础行且耐久
+    /// 合规=零写）；全部干净时只打一次 scan-clean 行。cfg 不自动复位——作者反复进出档确认满意后手动
+    /// 关回 false，然后可安全删除 dll（README 说明由控制方后续补，此处只留代码注释）。</summary>
+    private static bool _resetCleanTraced;
+
+    private static void ResetAllLevelsIfArmed()
+    {
+        var armed = EndlessGuardPlugin.ResetLevels != null && EndlessGuardPlugin.ResetLevels.Value;
+        if (!armed) { _resetCleanTraced = false; return; }
+        var changed = 0;
+        foreach (var f in DevicesInPlay())
+        {
+            try
+            {
+                var cur = f.AgentConfigId;
+                var baseCfg = DeviceXpMath.BaseCfgOf(cur);
+                if (cur != baseCfg)
+                {
+                    f.AgentConfigId = baseCfg;
+                    GetComponent<TowerDeviceComponent>(f)?.OnInit(baseCfg);   // 攻击面板回到基础行原厂值
+                    changed++;
+                }
+                var dura = GetComponent<FurnitureDurabilityComponent>(f);
+                var baseMax = MaxHpOfRow(baseCfg);
+                if (dura != null && baseMax > 0 && (dura.MaxDurability != baseMax || dura.CurrentDurability > baseMax))
+                {
+                    dura.Initialize(Math.Min(dura.CurrentDurability, baseMax), baseMax);   // 夹取：不白送血
+                    changed++;
+                }
+            }
+            catch (Exception e) { EndlessGuardPlugin.Trace("[XP] reset probe: " + e.Message); }
+        }
+        var wiped = 0;
+        try { wiped = Store.ClearSlot(SlotKey); }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[XP] reset wipe: " + e.Message); }
+        if (wiped > 0)
+        {
+            try { Store.Save(); }   // 账本清空即落盘（作者关 dll 前的最后状态=空账本）
+            catch (Exception e) { EndlessGuardPlugin.Trace("[XP] reset save: " + e.Message); }
+        }
+        if (changed > 0 || wiped > 0)
+        {
+            _resetCleanTraced = false;
+            EndlessGuardPlugin.Trace("[XP] levels reset (safe uninstall) slot=" + SlotKey + " devices=" + changed + " ledger=" + wiped);
+        }
+        else if (!_resetCleanTraced)
+        {
+            _resetCleanTraced = true;   // 每会话一次：作者确认还原已完成（已干净，可删 dll）
+            EndlessGuardPlugin.Trace("[XP] levels scan clean (safe uninstall ready) slot=" + SlotKey);
+        }
+    }
+
     /// <summary>在场受追踪家具枚举：BaseSingleton&lt;BattleLogicWorld&gt;._AgentManager.GetAllAgent()
-    /// （interop 实证：AgentManager : BaseEntity 非单例，属主=BattleLogicWorld._AgentManager 公开 getter，
-    /// 与 ResolveFurniture 同源；GetAllAgent():Il2CppList&lt;BaseAgent&gt; 公开无参）。过滤 IsDead、TryCast&lt;Furniture&gt;、
-    /// IsTrackedDevice。世界未建/列表不可达=空枚举（主菜单静默零开销）。</summary>
+    /// （interop 实证：AgentManager : BaseEntity 非单例，属主=BattleLogicWorld._AgentManager 公开 getter；
+    /// GetAllAgent():Il2CppList&lt;BaseAgent&gt; 公开无参）。过滤 IsDead、TryCast&lt;Furniture&gt;、
+    /// IsTrackedDevice（基础行或派生行）。世界未建/列表不可达=空枚举（主菜单静默零开销）。</summary>
     private static IEnumerable<Furniture> DevicesInPlay()
     {
         if (!GameCore.HotUpdate.BaseSingleton<BattleLogicWorld>.IsInstanceCreated) yield break;
@@ -279,22 +306,23 @@ internal static class DeviceXpRuntime
     /// <summary>总开关门（FallRestorer 同款语义：Enabled 未初始化=放行，显式 false=全部还原官方）。</summary>
     private static bool GateOn() => EndlessGuardPlugin.Enabled == null || EndlessGuardPlugin.Enabled.Value;
 
-    /// <summary>XP 门（Task 9，GateOn 之上再挂 Defense.XPEnabled）：false=经验系统整体停用——入账/等级
-    /// 属性写回/巡检对账/悬停等级全部停；已生效属性改动本局保留，重启读档后还原官方原厂值（账本保留）。</summary>
+    /// <summary>XP 门（Task 9，GateOn 之上再挂 Defense.XPEnabled）：false=经验系统整体停用——入账/换行
+    /// 巡检/悬停进度行全部停；已换行的设备本局保留（行内容即数值），重启读档后仍按保存的行号原样回来。</summary>
     internal static bool XpOn() => GateOn() && (EndlessGuardPlugin.XPEnabled == null || EndlessGuardPlugin.XPEnabled.Value);
 
-    /// <summary>只读等级查询（Task 5 悬停展示消费；纯读侧，零写路径）：tracked 设备 → 账本条目
-    /// lv/xp + 下一累计阈值（-1=满级）。未追踪/无账目/不可达=false（悬停保持官方原名）。复用
-    /// Store/CellKeyOf/RefreshSlotKey/Thresholds 同一套口径（与 trace 行 xp=total/next 一致）；
-    /// 异常只 trace 不上抛（低频 UI 路径宁缺毋炸）。</summary>
+    /// <summary>只读等级查询（悬停进度 trace 消费；纯读侧，零写路径）：tracked 设备 → 账本条目
+    /// lv/xp + 下一累计阈值（-1=满级）。未追踪/无账目/不可达=false。账本按基础 id 键控
+    /// （BaseCfgOf 归一）；异常只 trace 不上抛（低频 UI 路径宁缺毋炸）。</summary>
     internal static bool TryGetLevelInfo(Furniture f, out int lv, out int xp, out int next)
     {
         lv = 1; xp = 0; next = -1;
         try
         {
-            if (f == null || !DeviceXpMath.IsTrackedDevice(f.AgentConfigId)) return false;
+            if (f == null) return false;
+            var baseCfg = DeviceXpMath.BaseCfgOf(f.AgentConfigId);
+            if (!DeviceXpMath.IsTrackedDevice(baseCfg)) return false;
             RefreshSlotKey();
-            if (!Store.TryGet(SlotKey, f.AgentConfigId, CellKeyOf(f), out var e) || e == null) return false;
+            if (!Store.TryGet(SlotKey, baseCfg, CellKeyOf(f), out var e) || e == null) return false;
             lv = Math.Max(1, e.Lv);
             xp = e.Xp;
             next = lv >= MaxLevel ? -1 : DeviceXpMath.NextThreshold(lv, Thresholds());   // cfg 降上限时提前 MAX
@@ -307,7 +335,7 @@ internal static class DeviceXpRuntime
     // 入账与升级生效
     // =====================================================================
 
-    /// <summary>经验入账（唯一写入口）：账本+1 → 跨级则 ApplyLevel → 按 spec §3.4 格式 trace。
+    /// <summary>经验入账（唯一写入口）：账本（按基础 id 键控）+1 → 跨级则 ApplyLevel（换配置行）→ trace。
     /// 全程 try/catch，异常只 trace 不上抛（战斗热路径零炸点）。</summary>
     internal static void Award(Furniture furn, int amount)
     {
@@ -315,83 +343,86 @@ internal static class DeviceXpRuntime
         {
             if (furn == null || amount <= 0) return;
             if (!XpOn()) return;
-            var cfgId = furn.AgentConfigId;
-            if (!DeviceXpMath.IsTrackedDevice(cfgId)) return;
+            var baseCfg = DeviceXpMath.BaseCfgOf(furn.AgentConfigId);
+            if (!DeviceXpMath.IsTrackedDevice(baseCfg)) return;
             var cellKey = CellKeyOf(furn);
             RefreshSlotKey();
-            var entry = Store.GetOrNew(SlotKey, cfgId, cellKey);
+            var entry = Store.GetOrNew(SlotKey, baseCfg, cellKey);
             if (entry.Lv < 1) entry.Lv = 1;   // GetOrNew 新建条目默认 0 → 初始 Lv1（不触发 lvup 行）
             var newXp = entry.Xp + amount;
             var th = Thresholds();
             var lv = DeviceXpMath.LevelFromXp(newXp, MaxLevel, th);   // cfg MaxLevel 封顶（默认 5=阈值表长度+1，同旧行为）
-            if (lv > entry.Lv)   // 只升不降（阈值缩档不回退已生效属性）
+            if (lv > entry.Lv)   // 只升不降（阈值缩档不回退已换的行）
             {
                 entry.Lv = lv;
-                ApplyLevel(furn, lv);
-                EndlessGuardPlugin.Trace("[XP] lvup cfg=" + cfgId + " lv=" + lv);   // spec §3.4 逐字格式
+                ApplyLevel(furn, lv);   // lvup trace（cfg=/lv=/row=）由 ApplyLevel 打，一行不重复
             }
-            Store.Set(SlotKey, cfgId, cellKey, newXp, entry.Lv);   // 裁决：入账走 Set 整体覆写 + 置脏，不逐事件 Save
+            Store.Set(SlotKey, baseCfg, cellKey, newXp, entry.Lv);   // 裁决：入账走 Set 整体覆写 + 置脏，不逐事件 Save
             _dirty = true;
             var next = DeviceXpMath.NextThreshold(lv, th);
-            EndlessGuardPlugin.Trace("[XP] cfg=" + cfgId + " cell=" + cellKey + " xp=" + newXp + "/" + (next < 0 ? "MAX" : next.ToString()));
+            EndlessGuardPlugin.Trace("[XP] cfg=" + baseCfg + " cell=" + cellKey + " xp=" + newXp + "/" + (next < 0 ? "MAX" : next.ToString()));
         }
         catch (Exception e) { EndlessGuardPlugin.Trace("[XP] award: " + e.Message); }
     }
 
-    // 基线快照（裁决：首见即拍，先于任何改写；ApplyLevel 是唯一改写者，拍基线发生在其改写之前）
-    private sealed class DeviceBase { public int Attack; public float Interval; public float RangeSqr; public int MaxHp; }
-    private static readonly Dictionary<long, DeviceBase> Bases = new();   // key=家具实例id
-
-    /// <summary>升级生效（brief Produces 契约：ApplyLevel(Furniture, int)）：武器类直写 Attack/AttackIntervalSeconds，
-    /// AttackRangeSqr 仅箭塔(99005)（=TargetRange²）；耐久 AddMaxDurability(delta)+AddCurrentDurability(delta)（delta=target-现值，
-    /// 首次升级 delta==stepAbs，与裁决公式重合；正增量同步回满=满血语义，负增量（读档已含成长）不动）。
-    /// F4：durabilityOnly=true 时只回贴耐久（FurnitureDurabilityComponent.Initialize 粘性位不碰攻击面板）。</summary>
-    internal static void ApplyLevel(Furniture f, int lv, bool durabilityOnly = false)
+    /// <summary>
+    /// 升级生效（fixwave2 重写，唯一动作=换配置行）：f.AgentConfigId 换到派生行（lv1=基础行本身），
+    /// 然后官方重初始化让行数值当场生效——TowerDeviceComponent.OnInit(行号)（攻击面板）+
+    /// FurnitureDurabilityComponent.Initialize(满,满)（耐久满血，升级语义含修复）。零组件属性直写。
+    /// 官方之后的任意重快照（读档/修理/重入）读的是同一行 → 天然稳定，无需回贴。
+    /// 已在该行=零写零 trace（幂等）。行号不可得（非名单/越级）=trace 告警不动。
+    /// </summary>
+    internal static void ApplyLevel(Furniture f, int lv)
     {
         try
         {
             if (f == null || lv < 1) return;
-            var cfgId = f.AgentConfigId;
-            var ownerId = f.InstanceId;
-            var tower = GetComponent<TowerDeviceComponent>(f);
-            var dura = GetComponent<FurnitureDurabilityComponent>(f);
-            var b = GetOrCaptureBase(ownerId, tower, dura);
-            if (b == null) return;
-
-            if (!durabilityOnly && IsWeaponClass(cfgId) && tower != null)
+            var baseCfg = DeviceXpMath.BaseCfgOf(f.AgentConfigId);
+            var derived = DeviceXpMath.RowIdFor(baseCfg, lv);
+            if (derived < 0)
             {
-                tower.Attack = DeviceXpMath.TargetAttack(b.Attack, lv, WeaponAtkStep);
-                tower.AttackIntervalSeconds = DeviceXpMath.TargetInterval(b.Interval, lv, WeaponIntervalStep);
-                if (cfgId == ArrowTowerCfgId)
-                {
-                    tower.AttackRangeSqr = DeviceXpMath.TargetRangeSqr(b.RangeSqr, lv, TowerRangeStep);   // brief：AttackRangeSqr(=TargetRange²)，与巡检判定同一换算
-                }
+                EndlessGuardPlugin.Trace("[XP] lvup skip: no row for cfg=" + baseCfg + " lv=" + lv);
+                return;
             }
-            if (dura != null && b.MaxHp > 0)
-            {
-                var stepAbs = DeviceXpMath.StepAbs(b.MaxHp, HpStepRatioFor(cfgId));
-                var targetMax = DeviceXpMath.TargetMaxHp(b.MaxHp, lv, stepAbs);
-                var delta = targetMax - dura.MaxDurability;
-                if (delta > 0) { dura.AddMaxDurability(delta); dura.AddCurrentDurability(delta); }   // 同步加并回满
-            }
-            RecordPulse(ownerId);
+            if (f.AgentConfigId == derived) return;   // 已在该行：零写（幂等）
+            f.AgentConfigId = derived;                // 唯一写入：换配置行（游戏自己的存档系统会带上它）
+            ReinitFromRow(f, derived, fullHeal: true);
+            RecordPulse(f.InstanceId);
+            EndlessGuardPlugin.Trace("[XP] lvup cfg=" + baseCfg + " lv=" + lv + " row=" + derived);
         }
         catch (Exception e) { EndlessGuardPlugin.Trace("[XP] applyLevel: " + e.Message); }
     }
 
-    private static DeviceBase GetOrCaptureBase(long ownerId, TowerDeviceComponent tower, FurnitureDurabilityComponent dura)
+    /// <summary>换行后官方重初始化（fixwave2）：攻击面板 OnInit(行号)（组件不在=跳过，沙包无塔组件）；
+    /// 耐久 Initialize(cur/max, 上限)——上限=派生/基础行 FurnitureHPMax（配置读不到退化账面目标值，
+    /// 再不行跳过耐久）。fullHeal=true（升级路径）回满；false（巡检补写/还原路径）min(cur,上限) 夹取不白送血。</summary>
+    private static void ReinitFromRow(Furniture f, int rowId, bool fullHeal)
     {
-        if (Bases.TryGetValue(ownerId, out var b) && b != null) return b;
-        if (tower == null && dura == null) return null;   // 两件组件都够不着=没的可改没的可拍
-        b = new DeviceBase
+        try { GetComponent<TowerDeviceComponent>(f)?.OnInit(rowId); }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[XP] reinit OnInit: " + e.Message); }
+        try
         {
-            Attack = tower != null ? tower.Attack : 0,
-            Interval = tower != null ? tower.AttackIntervalSeconds : 0f,
-            RangeSqr = tower != null ? tower.AttackRangeSqr : 0f,
-            MaxHp = dura != null ? dura.MaxDurability : 0,
-        };
-        Bases[ownerId] = b;
-        return b;
+            var dura = GetComponent<FurnitureDurabilityComponent>(f);
+            if (dura == null) return;
+            var max = MaxHpOfRow(rowId);
+            if (max <= 0) return;   // 配置不可达：不动耐久（宁缺毋错血）
+            dura.Initialize(fullHeal ? max : Math.Min(dura.CurrentDurability, max), max);
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[XP] reinit dura: " + e.Message); }
+    }
+
+    /// <summary>配置行耐久上限（FurnitureHPMax；行不可达=-1）。ConfigManager 单例直读
+    ///（DeviceXpHover 同款模式）。</summary>
+    private static int MaxHpOfRow(int rowId)
+    {
+        try
+        {
+            var cfg = GameCore.HotUpdate.BaseSingleton<GameCore.HotUpdate.ConfigManager>.IsInstanceCreated
+                ? GameCore.HotUpdate.BaseSingleton<GameCore.HotUpdate.ConfigManager>.Instance?.Get_Config_Furniture(rowId)
+                : null;
+            return cfg != null ? cfg.FurnitureHPMax : -1;
+        }
+        catch { return -1; }
     }
 
     // 升级发光脉冲：逻辑层无 Renderer 直连（裁决 simplification）——只记起点列表，RenderPulse() 留给 T8 的逐帧 ticker。
@@ -471,8 +502,8 @@ internal static class DeviceXpRuntime
         catch { return null; }
     }
 
-    /// <summary>家具 cellKey：TransformComponent.Position 四舍五入 "x,z"；不可达退化 ownerId（裁决注明，T4 复核）。
-    /// internal=F5 悬停取证要打账本键字符串（DeviceXpHover 同装配）。</summary>
+    /// <summary>家具 cellKey：TransformComponent.Position 四舍五入 "x,z"；不可达退化 ownerId（裁决注明）。
+    /// internal=悬停进度 trace 要打账本键字符串（DeviceXpHover 同装配）。</summary>
     internal static string CellKeyOf(Furniture f)
     {
         try
@@ -502,27 +533,22 @@ internal static class DeviceXpRuntime
         catch { return -1; }
     }
 
-    /// <summary>设备当前等级（无条目=1；异常=1——前缀减伤宁可少扣不可炸）。</summary>
-    private static int LevelOf(int cfgId, string cellKey)
-    {
-        try { return Store.TryGet(SlotKey, cfgId, cellKey, out var e) && e != null && e.Lv > 1 ? e.Lv : 1; }
-        catch { return 1; }
-    }
-
     // =====================================================================
-    // 锚点 1：FurnitureDurabilityComponent.TakeDamage（承伤减免 + 沙包/承伤经验）
+    // 锚点 1：FurnitureDurabilityComponent.TakeDamage（承伤经验；fixwave2 起前缀只读，减伤在派生行配置里）
     // =====================================================================
 
     /// <summary>
-    /// 前缀：属主家具在名单且 ShouldScaleIncomingDamage(isRepair) 时按 IncomingDamageFactor 缩 damage（ref 写回，截断取整）。
-    /// 非名单（门/窗等）一字节不动。同时拍 hpBefore（CurrentDurability）供后缀算实际掉血。
-    /// 后缀：hpLost>0 才入账（修理/未破防=负数或零，跳过），AwardForTaken(hpLost, 沙包×2 其余×1)。
-    /// _ctx 前缀置后缀清（游戏主线程单线调用，同帧嵌套 TakeDamage 不存在；异常路径由前缀置 null 兜底）。
+    /// 前缀（只读）：属主家具在名单（基础 id 归一后）即拍 hpBefore（CurrentDurability）。零参数写、
+    /// 零组件写——受击减伤已由派生行 Config_TowerDevice.SelfDamagePerBite 承载（官方按配置自取）。
+    /// 后缀（只读组件+账本写）：hpLost&gt;0 才入账（修理/未破防=负数或零，跳过），
+    /// AwardForTaken(hpLost, 沙包×2 其余×1)。等级提升触发的换行经 Award→ApplyLevel（换行是游戏自己的
+    /// 存档属性+官方重初始化，非补丁写组件）。_ctx 前缀置后缀清（游戏主线程单线调用，同帧嵌套
+    /// TakeDamage 不存在；异常路径由前缀置 null 兜底）。
     /// </summary>
     [HarmonyPatch]
     internal static class TakeDamagePatch
     {
-        private sealed class Ctx { public Furniture Furn; public int CfgId; public int HpBefore; }
+        private sealed class Ctx { public Furniture Furn; public int BaseCfg; public int HpBefore; }
         private static Ctx _ctx;
 
         // 签名钉死（防重载/漂移静默 miss；mdump 实测 Void(Int32,Boolean,String,Boolean)）
@@ -530,21 +556,17 @@ internal static class DeviceXpRuntime
             AccessTools.Method(typeof(FurnitureDurabilityComponent), "TakeDamage",
                 new[] { typeof(int), typeof(bool), typeof(string), typeof(bool) });
 
-        private static void Prefix(FurnitureDurabilityComponent __instance, ref int damage, bool isRepair)
+        private static void Prefix(FurnitureDurabilityComponent __instance)
         {
             _ctx = null;
             try
             {
-                if (__instance == null || !XpOn()) return;   // XP 关=字节透传（不减伤也不入账，Task 9 门）
+                if (__instance == null || !XpOn()) return;   // XP 关=不入账（减伤在配置行，不受此门管）
                 var furn = ResolveFurniture(__instance.ownerInstanceId);
                 if (furn == null) return;
-                var cfgId = furn.AgentConfigId;
-                if (!DeviceXpMath.IsTrackedDevice(cfgId)) return;   // 门/窗=字节透传
-                _ctx = new Ctx { Furn = furn, CfgId = cfgId, HpBefore = __instance.CurrentDurability };
-                if (!DeviceXpMath.ShouldScaleIncomingDamage(isRepair)) return;   // 修理不缩放（spec §3.4 前缀门）
-                var lv = LevelOf(cfgId, CellKeyOf(furn));
-                var factor = DeviceXpMath.IncomingDamageFactor(lv, IncomingFactorFor(cfgId));
-                damage = (int)(damage * factor);   // 裁决逐字：截断取整
+                var baseCfg = DeviceXpMath.BaseCfgOf(furn.AgentConfigId);
+                if (!DeviceXpMath.IsTrackedDevice(baseCfg)) return;   // 门/窗=不关注
+                _ctx = new Ctx { Furn = furn, BaseCfg = baseCfg, HpBefore = __instance.CurrentDurability };
             }
             catch (Exception e) { EndlessGuardPlugin.Trace("[XP] TakeDamage prefix: " + e.Message); }
         }
@@ -558,7 +580,7 @@ internal static class DeviceXpRuntime
             {
                 var lost = ctx.HpBefore - __instance.CurrentDurability;
                 if (lost <= 0) return;   // 未破防/修理回血不倒扣经验
-                Award(ctx.Furn, DeviceXpMath.AwardForTaken(lost, ctx.CfgId == SandbagCfgId ? SandbagXpRate : 1f));
+                Award(ctx.Furn, DeviceXpMath.AwardForTaken(lost, ctx.BaseCfg == SandbagCfgId ? SandbagXpRate : 1f));
             }
             catch (Exception e) { EndlessGuardPlugin.Trace("[XP] TakeDamage postfix: " + e.Message); }
         }
@@ -569,7 +591,7 @@ internal static class DeviceXpRuntime
     // =====================================================================
 
     /// <summary>前缀快照目标 HP（口径=GetAgent→Zombie.CurrentHP，解析失败哨兵 -1）；后缀按 AwardForFire(atk,count,mult)
-    /// 入账、快照时 HP>0 且现在 HP≤0 者逐个 AwardForKill 追加，并 raise DeviceFired（muzzle=家具位置，目标取首个）。</summary>
+    /// 入账、快照时 HP&gt;0 且现在 HP≤0 者逐个 AwardForKill 追加，并 raise DeviceFired（muzzle=家具位置，目标取首个）。</summary>
     [HarmonyPatch]
     internal static class FireDevicePatch
     {
@@ -667,11 +689,12 @@ internal static class DeviceXpRuntime
     }
 
     // =====================================================================
-    // 锚点 3：TowerCombatManager.ApplyZombieBite（咬击反伤经验：尖刺 36002）
+    // 锚点 3：TowerCombatManager.ApplyZombieBite（咬击反伤经验：尖刺 36002 含派生行）
     // =====================================================================
 
-    /// <summary>后缀：受咬设备=zombie.AssignedTargetId → GetAgent → Furniture；cfg==36002 时按其 TowerDeviceComponent.
-    /// CounterDamage 入账（读不到退化 spec 默认 15）。非尖刺/解析失败一律静默跳过（战斗热路径零噪音）。</summary>
+    /// <summary>后缀：受咬设备=zombie.AssignedTargetId → GetAgent → Furniture；BaseCfgOf==36002 时按其
+    /// TowerDeviceComponent.CounterDamage 入账（组件读不到退化 spec 默认 15）。非尖刺/解析失败一律静默
+    /// 跳过（战斗热路径零噪音）。</summary>
     [HarmonyPatch]
     internal static class ApplyZombieBitePatch
     {
@@ -684,7 +707,7 @@ internal static class DeviceXpRuntime
             {
                 if (zombie == null || !XpOn()) return;   // XP 关=反伤不入账
                 var furn = ResolveFurniture(zombie.AssignedTargetId);
-                if (furn == null || furn.AgentConfigId != SpikeCfgId) return;
+                if (furn == null || DeviceXpMath.BaseCfgOf(furn.AgentConfigId) != SpikeCfgId) return;
                 if (!DeviceXpMath.IsTrackedDevice(SpikeCfgId)) return;
                 var tower = GetComponent<TowerDeviceComponent>(furn);
                 var counter = tower != null && tower.CounterDamage > 0 ? tower.CounterDamage : 15;
@@ -698,7 +721,8 @@ internal static class DeviceXpRuntime
     // 锚点 4：TowerCombatManager.HitZombieByWreck（残骸撞尸经验）
     // =====================================================================
 
-    /// <summary>后缀：残骸家具直接是首参；按其 TowerDeviceComponent.WreckDamage 入账（组件读不到退化 damage 入参）。</summary>
+    /// <summary>后缀：残骸家具直接是首参；按其 TowerDeviceComponent.WreckDamage 入账（组件读不到退化 damage 入参）。
+    /// 派生行设备的组件值由 OnInit(派生行) 官方重快照（WreckDamage 结构同源），读侧无需归一。</summary>
     [HarmonyPatch]
     internal static class HitZombieByWreckPatch
     {
@@ -717,86 +741,6 @@ internal static class DeviceXpRuntime
                 Award(furniture, wreck);
             }
             catch (Exception e) { EndlessGuardPlugin.Trace("[XP] HitZombieByWreck postfix: " + e.Message); }
-        }
-    }
-
-    // =====================================================================
-    // 锚点 5/6（F4 粘性复贴，2026-10-31 playtest "升级被官方反复还原"）：官方重快照的【源头】
-    // 当场回贴等级值——TowerDeviceComponent.OnInit(int)（攻击面板重快照）与
-    // FurnitureDurabilityComponent.Initialize(int,int)（耐久重快照，读档/重入/修理路径共用）。
-    // 2s ticker 对账仍是兜底；这两补丁把"快照→追平"之间最长 2s 的回退可见窗压缩到 0。
-    // 签名钉死（dump.cs 369641 / 369102，均单重载公开方法，非属性——红线自检过）。
-    // =====================================================================
-
-    /// <summary>F4 粘性节流（同设备 2s 最多回贴一次）：防官方风暴式重初始化时 trace 刷屏/重复写；
-    /// TickCount 环绕安全比较。2s ticker 对账不受此限（独立路径，仍兜全量）。</summary>
-    private static readonly Dictionary<long, int> StickyTicks = new();
-
-    /// <summary>粘性回贴核心：属主在册且账本 Lv&gt;1 → ApplyLevel 重放（基线快照"首见即拍"发生在
-    /// 官方重快照之后=拍到的恰是原厂值，重放幂等收敛）。无账目/低级=静默放行（新放置设备零扰动）。</summary>
-    private static void StickyReapply(Furniture f, int cfgId, bool durabilityOnly)
-    {
-        try
-        {
-            var ownerId = f.InstanceId;
-            var now = Environment.TickCount;
-            if (StickyTicks.TryGetValue(ownerId, out var last)
-                && unchecked((uint)(now - last)) < 2000) return;
-            RefreshSlotKey();
-            if (!Store.TryGet(SlotKey, cfgId, CellKeyOf(f), out var e) || e == null || e.Lv <= 1) return;
-            StickyTicks[ownerId] = now;
-            ApplyLevel(f, e.Lv, durabilityOnly);
-            EndlessGuardPlugin.Trace("[XP] reinit-sticky cfg=" + cfgId + " lv=" + e.Lv
-                                     + (durabilityOnly ? " (hp)" : ""));
-        }
-        catch (Exception ex) { EndlessGuardPlugin.Trace("[XP] reinit-sticky: " + ex.Message); }
-    }
-
-    /// <summary>锚点 5（F4）：TowerDeviceComponent.OnInit 后官方刚重快照攻击面板——属主受追踪且
-    /// 账本 Lv&gt;1 即整级回贴（攻击+耐久都重申；耐久路径幂等只加不减）。</summary>
-    [HarmonyPatch]
-    internal static class TowerInitStickyPatch
-    {
-        private static MethodBase TargetMethod() =>
-            AccessTools.Method(typeof(TowerDeviceComponent), "OnInit", new[] { typeof(int) });
-
-        private static void Postfix(TowerDeviceComponent __instance, int furnitureConfigId)
-        {
-            try
-            {
-                if (__instance == null || !XpOn()) return;   // XP 关=字节透传
-                var furn = ResolveFurniture(__instance.ownerInstanceId);
-                if (furn == null) return;
-                var cfgId = furn.AgentConfigId;              // 以属主实配为准（furnitureConfigId 入参互核用不上）
-                if (!DeviceXpMath.IsTrackedDevice(cfgId)) return;
-                StickyReapply(furn, cfgId, durabilityOnly: false);
-            }
-            catch (Exception e) { EndlessGuardPlugin.Trace("[XP] reinit-sticky probe(tower): " + e.Message); }
-        }
-    }
-
-    /// <summary>锚点 6（F4）：FurnitureDurabilityComponent.Initialize(int,int) 后官方刚重快照耐久——
-    /// 只回贴耐久（durabilityOnly，不碰攻击面板）。全家具都会走此方法：靠 IsTrackedDevice+账本双重
-    /// 门把开销压到字典查询级（门窗等一笔比较即出）。</summary>
-    [HarmonyPatch]
-    internal static class DurabilityInitStickyPatch
-    {
-        private static MethodBase TargetMethod() =>
-            AccessTools.Method(typeof(FurnitureDurabilityComponent), "Initialize",
-                new[] { typeof(int), typeof(int) });
-
-        private static void Postfix(FurnitureDurabilityComponent __instance, int curDurability, int maxDurability)
-        {
-            try
-            {
-                if (__instance == null || !XpOn()) return;   // XP 关=字节透传
-                var furn = ResolveFurniture(__instance.ownerInstanceId);
-                if (furn == null) return;
-                var cfgId = furn.AgentConfigId;
-                if (!DeviceXpMath.IsTrackedDevice(cfgId)) return;
-                StickyReapply(furn, cfgId, durabilityOnly: true);
-            }
-            catch (Exception e) { EndlessGuardPlugin.Trace("[XP] reinit-sticky probe(dura): " + e.Message); }
         }
     }
 }

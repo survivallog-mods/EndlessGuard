@@ -276,12 +276,13 @@ internal sealed class ArrowTowerFx : MonoBehaviour
 
     // ══════════════════════════ 事件与注册表 ═══════════════════════════
 
-    /// <summary>DeviceFired 消费：仅箭塔（99005）入口；后坐+追踪窗+派箭。其他设备一条比较即出。</summary>
+    /// <summary>DeviceFired 消费：仅箭塔（99005，含升级派生行 99152..99155——BaseCfgOf 归一）入口；
+    /// 后坐+追踪窗+派箭。其他设备一条比较即出。</summary>
     private static void OnDeviceFired(long furnitureId, Vector3 muzzle, long targetId)
     {
         try
         {
-            if (ResolveTowerCfg(furnitureId) != ArrowTower.Id) return;
+            if (DeviceXpMath.BaseCfgOf(ResolveTowerCfg(furnitureId)) != ArrowTower.Id) return;
             if (!Towers.TryGetValue(furnitureId, out var t) || t == null)
                 Towers[furnitureId] = t = new TowerFx { Id = furnitureId };
 

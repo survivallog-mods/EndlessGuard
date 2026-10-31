@@ -5,6 +5,10 @@ namespace SurvivalLog.EndlessGuard;
 
 /// <summary>
 /// 箭塔「99005」（功能B，spec §4.1/§4.2）：四表内存注入 + 防线 Lv4 解锁登记。
+/// fixwave2 追加：派生等级行注入（99112..99155，DeviceXpMath.RowIdFor 方案）——升级=换配置行架构的
+/// "行"从这来：每基础设备 lv2..5 各一行 Config_Furniture + Config_TowerDevice，全字段克隆源行
+///（官方 36001-36004 从活字典读=gamekb 内容；99005 从我方注入行克隆），仅覆盖 ID/名称+“ Lv.N”/
+/// 目标耐久/InCodex=false（家具行）与 Attack/Interval/Range/SelfDamagePerBite（塔数值行）。
 /// 行：Config_TowerDevice/Config_Furniture/Config_Item(包裹)/Config_ProductionList(配方) 统一 ID=99005
 ///（99xxx 预留段，作者裁决 2026-10-30：紧贴官方空位必撞号）；Config_DefenseLv Lv4 unlock_recipes
 /// [403]→[403,99005] 且 Info_Local 追加「新增：解锁 箭塔」（与电锯同档）。
@@ -53,7 +57,9 @@ internal static class ArrowTower
     private const string PackageModel = "Assets/RuntimeAssets/Prefabs/Furniture/P_Paperbox_009_S1_M02";           // 与 26004 同款纸盒
 
     /// <summary>GuardTicker 2s 巡检入口（照抄 ScavengePlans.OnConfigStep：总开关下再挂本功能开关；
-    /// Cm() 单例未建→下轮再试；五张 dict 任一未装载→下轮再试；哨兵齐→稳态静默返回）。</summary>
+    /// Cm() 单例未建→下轮再试；五张 dict 任一未装载→下轮再试；哨兵齐→稳态静默返回）。
+    /// fixwave2：派生等级行（99112..99155）随四表一起注入/哨兵重放；另有成长 cfg 新鲜度哨兵——
+    /// 步长/系数类 cfg 改值后重建派生行内容（组件面板在下次官方重初始化时吸收新值）。</summary>
     internal static void OnStep()
     {
         if (EndlessGuardPlugin.ArrowTowerEnabled != null && !EndlessGuardPlugin.ArrowTowerEnabled.Value) return;   // 关=不注入（已注入行为进程内存态，本局保留，重启干净）
@@ -68,11 +74,13 @@ internal static class ArrowTower
         if (td == null || fu == null || it == null || pl == null || dl == null) return;   // 装表中（2026-10-24 实锤：Cm() 就绪≠dict 就绪），下轮再试
 
         // 哨兵复查（Plans[0] 模式）：官方重试/换语言重跑 Initialize 会整体重建 _Config_*_Dict——
-        // 四表任一丢 99005 或 Lv4 丢解锁项即全量重放（Inject 内部逐行 ContainsKey/Contains 幂等，重放无副作用）
+        // 四表任一丢 99005、派生行缺任一、或 Lv4 丢解锁项即全量重放（Inject 内部逐行 ContainsKey/Contains 幂等，重放无副作用）
         bool rowsMissing = !td.ContainsKey(Id) || !fu.ContainsKey(Id) || !it.ContainsKey(Id) || !pl.ContainsKey(Id);
-        bool legacyNeedsSync = !rowsMissing && LegacyRowNeedsSync(fu, it);   // F1/F6：旧版建行缺新字段 → 视同缺行重放补齐
+        bool derivedMissing = !rowsMissing && DerivedRowsMissing(td, fu);
+        bool legacyNeedsSync = !rowsMissing && !derivedMissing && LegacyRowNeedsSync(fu, it);
         bool lv4Missing = !dl.TryGetValue(DefenseLvKey, out var lv4) || lv4 == null || !Contains(lv4.unlock_recipes, Id);
-        if (!rowsMissing && !legacyNeedsSync && !lv4Missing)
+        bool xpStale = !rowsMissing && !derivedMissing && !legacyNeedsSync && DerivedRowsStale();
+        if (!rowsMissing && !derivedMissing && !legacyNeedsSync && !lv4Missing && !xpStale)
         {
             ArrowTowerModel.Arm();                // F2：只武装不建——模板推迟到首次 supply（场景内、设备在场）再拼
             ArrowTowerFx.EnsureStarted();         // 表稳态懒建动画/弹道 ticker（门=ArrowTowerEnabled，裁决见 ArrowTowerFx 类头；T8）
@@ -103,7 +111,7 @@ internal static class ArrowTower
         catch { return false; }
     }
 
-    /// <summary>注入/修复四行 + Lv4 登记。行级幂等：行已存在则跳过建行仅无条件拍平显示/数值字段
+    /// <summary>注入/修复四行 + 派生等级行 + Lv4 登记。行级幂等：行已存在则跳过建行仅无条件拍平显示/数值字段
     ///（半途异常重试时已入行不被判重挡死）；Lv4 追加前 Contains 判重、文案 Contains 判重。</summary>
     private static void Inject(
         Il2CppSystem.Collections.Generic.Dictionary<int, GameCore.HotUpdate.Config_TowerDevice> td,
@@ -118,14 +126,216 @@ internal static class ArrowTower
             InjectFurniture(fu);
             InjectPackageItem(it);
             InjectRecipe(pl);
+            InjectDerivedRows(td, fu);
             if (!UnlockDefenseLv4(dl))
             {
                 EndlessGuardPlugin.Trace("[Tower] Config_DefenseLv 缺 Lv" + DefenseLvKey + " 行（表漂移？四表已入，下轮重试登记）");
                 return;
             }
-            EndlessGuardPlugin.Trace("[Tower] tables injected 4/4 + defenseLv4 unlocked");
+            EndlessGuardPlugin.Trace("[Tower] tables injected 4/4 + derived " + DerivedInjectedCount + " rows + defenseLv4 unlocked");
         }
         catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] Inject: " + e.Message); }
+    }
+
+    // =====================================================================
+    // 派生等级行（fixwave2 核心配套；升级=换配置行架构的"行"从这来）
+    // =====================================================================
+
+    /// <summary>最近一次 InjectDerivedRows 实际写入的行数（trace 取证用；稳态重放=0）。</summary>
+    internal static int DerivedInjectedCount { get; private set; }
+
+    /// <summary>成长 cfg 签名（上次建派生行时的步长/系数组合；变了=派生行内容过期需重建）。</summary>
+    private static string _derivedSig;
+
+    /// <summary>派生行哨兵：任一派生行（lv2..5 × 5 基础）缺家具行或塔数值行=true（官方重建表后必然全缺）。</summary>
+    private static bool DerivedRowsMissing(
+        Il2CppSystem.Collections.Generic.Dictionary<int, GameCore.HotUpdate.Config_TowerDevice> td,
+        Il2CppSystem.Collections.Generic.Dictionary<int, GameCore.HotUpdate.Config_Furniture> fu)
+    {
+        try
+        {
+            foreach (var baseCfg in DeviceXpMath.TrackedBaseIds)
+                for (int lv = 2; lv <= 5; lv++)
+                {
+                    var rid = DeviceXpMath.RowIdFor(baseCfg, lv);
+                    if (!fu.ContainsKey(rid) || !td.ContainsKey(rid)) return true;
+                }
+            return false;
+        }
+        catch { return true; }   // 探测病态按缺行处理（下轮重放幂等）
+    }
+
+    /// <summary>成长 cfg 新鲜度哨兵：WeaponAtkStep 等影响派生行数值的 cfg 自上次建行后有变化=true。
+    /// （spec §3.5"改值即刻生效"语义在换行架构下落在行内容上：行重建后组件面板于下次官方重初始化吸收。）</summary>
+    private static bool DerivedRowsStale()
+    {
+        var sig = DerivedSig();
+        if (_derivedSig == null) { _derivedSig = sig; return false; }   // 冷启动：当前行就是按当前 cfg 建的
+        return !string.Equals(sig, _derivedSig, StringComparison.Ordinal);
+    }
+
+    private static string DerivedSig() =>
+        DeviceXpRuntime.WeaponAtkStep + "|" + DeviceXpRuntime.WeaponIntervalStep + "|" +
+        DeviceXpRuntime.WeaponHpStepRatio + "|" + DeviceXpRuntime.SandbagHpStepRatio + "|" +
+        DeviceXpRuntime.TowerRangeStep + "|" + DeviceXpRuntime.WeaponDefFactor + "|" +
+        DeviceXpRuntime.SandbagDefFactor;
+
+    /// <summary>建/刷新派生等级行（lv 2..5 × 5 基础设备；fixwave2）：家具行=源行全字段克隆，仅覆盖
+    /// ID/Name(_Local)=基础名+" Lv.N"/FurnitureHP(_Max)=该级目标耐久/InCodex=false（箭塔家族 ResName
+    /// 原样=P_Tripo05，模型供给不受影响）；塔数值行=源行克隆，仅 Attack/AttackInterval（武器+箭塔）、
+    /// AttackRange（箭塔）、SelfDamagePerBite（按减伤系数缩放，基 0 恒 0=官方四件套/箭塔原值即无咬伤）。
+    /// 源行从 ConfigManager 活字典读（官方 36001-36004 即 gamekb 表内容；99005 是我方注入行）——不硬编码
+    /// 官方数值，表漂移时跟随。行在则原对象全字段重拍（幂等+cfg 新鲜度重建共用此路径）；列表字段全部
+    /// 全新实例逐元素拷贝（官方消费方直读 .Count，null/共享实例有 NRE/Clear 连坐风险）。</summary>
+    private static void InjectDerivedRows(
+        Il2CppSystem.Collections.Generic.Dictionary<int, GameCore.HotUpdate.Config_TowerDevice> td,
+        Il2CppSystem.Collections.Generic.Dictionary<int, GameCore.HotUpdate.Config_Furniture> fu)
+    {
+        var created = 0;
+        try
+        {
+            foreach (var baseCfg in DeviceXpMath.TrackedBaseIds)
+            {
+                if (!fu.TryGetValue(baseCfg, out var srcF) || srcF == null ||
+                    !td.TryGetValue(baseCfg, out var srcT) || srcT == null)
+                {
+                    EndlessGuardPlugin.Trace("[Tower] derived skip: base row missing cfg=" + baseCfg);
+                    continue;
+                }
+                for (int lv = 2; lv <= 5; lv++)
+                {
+                    var rid = DeviceXpMath.RowIdFor(baseCfg, lv);
+                    if (!fu.TryGetValue(rid, out var dstF) || dstF == null)
+                    {
+                        dstF = new GameCore.HotUpdate.Config_Furniture();
+                        fu[rid] = dstF;
+                        created++;
+                    }
+                    FillDerivedFurniture(dstF, srcF, rid, lv, baseCfg);
+                    if (!td.TryGetValue(rid, out var dstT) || dstT == null)
+                    {
+                        dstT = new GameCore.HotUpdate.Config_TowerDevice();
+                        td[rid] = dstT;
+                        created++;
+                    }
+                    FillDerivedTowerDevice(dstT, srcT, rid, lv, baseCfg);
+                }
+            }
+            DerivedInjectedCount = created;
+            _derivedSig = DerivedSig();   // 行内容已按当前 cfg 拍平，新鲜度基线同步
+            if (created > 0)
+                EndlessGuardPlugin.Trace("[Tower] derived rows injected: " + created + " (2..5 × 5 bases)");
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] derived: " + e.Message); }
+    }
+
+    /// <summary>派生家具行全字段拍平（源行克隆 + 等级覆盖；字段清单=interop mdump 实测全可写集，
+    /// 与 InjectFurniture 同一口径）。</summary>
+    private static void FillDerivedFurniture(
+        GameCore.HotUpdate.Config_Furniture f, GameCore.HotUpdate.Config_Furniture src, int rid, int lv, int baseCfg)
+    {
+        var name = DeviceXpMath.WithLevelSuffix(DisplayBaseName(src), lv);
+        f.ID = rid;
+        f.Name = name; f.Name_Local = name;                      // 字面中文（GetLocalText 键 miss 原样透传=直接显示）
+        f.FsmName = src.FsmName;
+        f.Story = src.Story;
+        f.ResName = src.ResName;                                 // 箭塔家族原样 P_Tripo05 → 模型供给照常命中
+        f.BagResName = src.BagResName;
+        f.ICON = src.ICON;
+        f.FurniturePrice = src.FurniturePrice;
+        f.PawnPrice = src.PawnPrice;
+        f.PurchaseRewardSetId = src.PurchaseRewardSetId;
+        f.InstallTime = src.InstallTime;
+        f.Des = src.Des; f.Des_Local = src.Des_Local;
+        f.FurnitureType = src.FurnitureType;
+        f.ShopPage = src.ShopPage;
+        f.DemoTwoMode = src.DemoTwoMode;
+        f.SlotType = src.SlotType;
+        f.isAutoSilence = src.isAutoSilence;
+        f.isShowName = src.isShowName;
+        f.ShowStorage = src.ShowStorage;
+        f.isShowHP = src.isShowHP;
+        var baseHp = src.FurnitureHPMax > 0 ? src.FurnitureHPMax : src.FurnitureHP;   // 官方行 HP==HPMax；Max 优先
+        var stepAbs = DeviceXpMath.StepAbs(baseHp, DeviceXpRuntime.HpStepRatioFor(baseCfg));
+        var hp = DeviceXpMath.TargetMaxHp(baseHp, lv, stepAbs);
+        f.FurnitureHP = hp; f.FurnitureHPMax = hp;
+        f.FurnitureLowHP = src.FurnitureLowHP; f.FurnitureLowHP_Local = src.FurnitureLowHP_Local;
+        f.isFurnitureDead = src.isFurnitureDead;
+        f.FurnitureDeadText = src.FurnitureDeadText; f.FurnitureDeadText_Local = src.FurnitureDeadText_Local;
+        f.FurnitureFunc = CopyList(src.FurnitureFunc);
+        f.RemoveFunc = CopyList(src.RemoveFunc);                 // 官方 299 卸载/1608 搬动逐元素拷贝（可卸载性随行保留）
+        f.MoveFunc = CopyList(src.MoveFunc);
+        f.RemoveGet = CopyList(src.RemoveGet);
+        f.ActionId = src.ActionId;
+        f.ActionPos = src.ActionPos;
+        f.PlantFurnitureID = src.PlantFurnitureID;
+        f.CookFurnitureID = src.CookFurnitureID;
+        f.VaseCapacity = src.VaseCapacity;
+        f.BagId = src.BagId;
+        f.IsElectrical = src.IsElectrical;
+        f.ElectricalType = src.ElectricalType;
+        f.ColdRate = src.ColdRate;
+        f.PowerCost = src.PowerCost;
+        f.PowerMode = src.PowerMode;
+        f.HeatOutput = src.HeatOutput;
+        f.ElectricalFurnitureID = src.ElectricalFurnitureID;
+        f.RestoreCoeff = src.RestoreCoeff;
+        f.DefReduceCoeff = src.DefReduceCoeff;
+        f.InCodex = false;                                       // 派生行不进图鉴（brief 明确）
+        f.LootRandomGroupId = src.LootRandomGroupId;
+        f.LootRandomGroupId_P1 = src.LootRandomGroupId_P1;
+        f.LootRandomGroupId_P2 = src.LootRandomGroupId_P2;
+        f.LootRandomGroupId_P3 = src.LootRandomGroupId_P3;
+        f.LootRandomGroupId_P4 = src.LootRandomGroupId_P4;
+        f.LootRandomCount = src.LootRandomCount;
+        f.RotProductOverride = CopyList(src.RotProductOverride);
+        f.RotSourceSubCategory = CopyList(src.RotSourceSubCategory);
+        f.BagAcceptCategory = src.BagAcceptCategory;
+        f.RobotPlayerID = src.RobotPlayerID;
+    }
+
+    /// <summary>派生塔数值行全字段拍平（源行克隆 + 等级覆盖）：Attack/AttackInterval=Target*（武器+箭塔；
+    /// 沙包/尖刺攻击面板本为 0，直拷语义等价，仍按类判定执行）；AttackRange=TargetRange（仅箭塔）；
+    /// SelfDamagePerBite=源值×IncomingDamageFactor 四舍五入（受击减伤的新承载点；基 0 恒 0）。</summary>
+    private static void FillDerivedTowerDevice(
+        GameCore.HotUpdate.Config_TowerDevice t, GameCore.HotUpdate.Config_TowerDevice src, int rid, int lv, int baseCfg)
+    {
+        t.ID = rid;
+        t.AttackPriority = src.AttackPriority;
+        t.MaxAttackers = src.MaxAttackers;
+        t.IsWalkThrough = src.IsWalkThrough;
+        t.ExclusiveCharacter = src.ExclusiveCharacter;
+        t.Attack = DeviceXpRuntime.IsWeaponClass(baseCfg)
+            ? DeviceXpMath.TargetAttack(src.Attack, lv, DeviceXpRuntime.WeaponAtkStep)
+            : src.Attack;
+        t.AttackInterval = DeviceXpRuntime.IsWeaponClass(baseCfg)
+            ? DeviceXpMath.TargetInterval(src.AttackInterval, lv, DeviceXpRuntime.WeaponIntervalStep)
+            : src.AttackInterval;
+        t.AttackRange = baseCfg == Id
+            ? DeviceXpMath.TargetRange(src.AttackRange, lv, DeviceXpRuntime.TowerRangeStep)
+            : src.AttackRange;
+        t.BurstCount = src.BurstCount;
+        t.HitSlowRatio = src.HitSlowRatio;
+        t.HitSlowSeconds = src.HitSlowSeconds;
+        t.CounterDamage = src.CounterDamage;                     // 尖刺反伤不随级成长（spec §3.4 反伤=经验来源）
+        t.SelfDamagePerBite = src.SelfDamagePerBite != 0
+            ? (int)Math.Round(src.SelfDamagePerBite * DeviceXpMath.IncomingDamageFactor(lv, DeviceXpRuntime.IncomingFactorFor(baseCfg)), MidpointRounding.AwayFromZero)
+            : 0;
+        t.PowerCostPerHit = src.PowerCostPerHit;
+        t.MaxHitTargets = src.MaxHitTargets;
+    }
+
+    /// <summary>源行显示名（派生行 Name 基底）：Name_Local（字面中文）优先，空退 Name 键。</summary>
+    private static string DisplayBaseName(GameCore.HotUpdate.Config_Furniture src) =>
+        !string.IsNullOrEmpty(src.Name_Local) ? src.Name_Local : src.Name;
+
+    /// <summary>Il2Cpp int 列表全新实例逐元素拷贝（源 null/病态=空列表——派生行列表字段恒非 null）。</summary>
+    private static Il2CppSystem.Collections.Generic.List<int> CopyList(Il2CppSystem.Collections.Generic.List<int> src)
+    {
+        var l = new Il2CppSystem.Collections.Generic.List<int>();
+        try { if (src != null) for (int i = 0; i < src.Count; i++) l.Add(src[i]); }
+        catch { /* 源病态：给空列表保消费方 .Count 不炸 */ }
+        return l;
     }
 
     /// <summary>塔体数值（spec §4.1 玻璃炮定位：高攻 14/速射 1.5s/远射 3.0/单体点名/低血 100/受击无减免）。</summary>

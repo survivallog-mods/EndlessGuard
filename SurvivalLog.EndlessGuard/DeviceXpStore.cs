@@ -103,6 +103,15 @@ internal sealed class DeviceXpStore
         entry.Lv = lv;
     }
 
+    /// <summary>清空一个存档槽的全部条目（Defense.ResetLevels 卸载还原路径用），返回清除条数；槽不存在=0。内存即时生效，Save 时落盘。</summary>
+    internal int ClearSlot(string slot)
+    {
+        if (!_slots.TryGetValue(slot, out var devices)) return 0;
+        var n = devices.Count;
+        _slots.Remove(slot);
+        return n;
+    }
+
     /// <summary>设备键："configId#cellKey"，如 "36001#12,8"（JSON 形状契约逐字）。</summary>
     private static string DeviceKey(int configId, string cellKey) => $"{configId}#{cellKey}";
 

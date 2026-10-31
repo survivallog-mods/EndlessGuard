@@ -139,6 +139,50 @@ public class DeviceXpStoreTests : IDisposable
         Assert.True(File.Exists(path));
     }
 
+    // ---- ClearSlot（fixwave2 Defense.ResetLevels 卸载还原路径） ----
+
+    [Fact]
+    public void ClearSlot_RemovesOnlyTargetSlot_AndReturnsCount()
+    {
+        var s = new DeviceXpStore(_path);
+        s.Set("s1", 36001, "12,8", 1500, 2);
+        s.Set("s1", 99005, "3,4", 20000, 5);
+        s.Set("s2", 36003, "0,1", 10, 1);
+
+        var n = s.ClearSlot("s1");
+        Assert.Equal(2, n);                                   // 条数=该槽条目数
+        Assert.False(s.TryGet("s1", 36001, "12,8", out _));
+        Assert.False(s.TryGet("s1", 99005, "3,4", out _));
+        Assert.True(s.TryGet("s2", 36003, "0,1", out var other));   // 其他槽原样保留
+        Assert.Equal(10, other.Xp);
+    }
+
+    [Fact]
+    public void ClearSlot_UnknownSlot_ReturnsZero_AndSecondClearIsZero()
+    {
+        var s = new DeviceXpStore(_path);
+        Assert.Equal(0, s.ClearSlot("nope"));
+        s.Set("s1", 36001, "1,1", 5, 1);
+        Assert.Equal(1, s.ClearSlot("s1"));
+        Assert.Equal(0, s.ClearSlot("s1"));   // 幂等：已空再清=0（还原模式 2s 轮询下零重复写盘依据）
+    }
+
+    [Fact]
+    public void ClearSlot_ThenSaveLoad_WipePersists()
+    {
+        var s1 = new DeviceXpStore(_path);
+        s1.Set("s1", 36001, "12,8", 1500, 2);
+        s1.Set("s2", 36003, "0,1", 10, 1);
+        s1.ClearSlot("s1");
+        s1.Save();
+
+        var s2 = new DeviceXpStore(_path);
+        s2.Load();
+        Assert.False(s2.TryGet("s1", 36001, "12,8", out _));
+        Assert.True(s2.TryGet("s2", 36003, "0,1", out var kept));
+        Assert.Equal(10, kept.Xp);
+    }
+
     // ---- GetOrNew 活引用 vs TryGet 只读语义 ----
 
     [Fact]

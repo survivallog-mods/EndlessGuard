@@ -47,9 +47,10 @@ namespace SurvivalLog.EndlessGuard;
 /// 变化）→ 原方法照常返 null → 官方兜底盒 + EnsureRegistered 补丁核验 trace 告警；postfix 内
 /// 异常 → catch 后原样放行 __result，游戏无感。
 /// 模板：首次注册建一次（静态字段，DontDestroyOnLoad+失活隐藏），每次请求 Instantiate 派发；
-/// 模板/实例均无 Collider、无 Rigidbody、无 Animator 等任何与家具 FSM 相争的组件（纯 MeshFilter/
-/// MeshRenderer）。被移除时官方归还路径 AddCache 会因 objDict 无此 obj 而直接 DestroyImmediate
-/// ——等于干净销毁，无泄漏。
+/// 模板/实例无 Rigidbody、无 Animator 等任何与家具 FSM 相争的动态组件（纯 MeshFilter/MeshRenderer）；
+/// fixwave2 起根上有唯一 BoxCollider（官方选取=物理射线，实测缺它塔无法点选/搬动/卸装）——散件图元
+/// Collider 仍逐个拆除（旧裁定的"相争"指散件物理体，罩体是官方设备模型的同款形态）。被移除时官方
+/// 归还路径 AddCache 会因 objDict 无此 obj 而直接 DestroyImmediate——等于干净销毁，无泄漏。
 /// T8 动画锚点：弩机整件为根下名为「Head」的直接子物体（旋转部，pivot 在平台中央）；旗子为
 /// 「Flag」直接子物体（pivot 在旗杆轴）——T8 只动这两个。
 /// 校验口径（C1 加固）：VerifyPatches 双重核验=①三重载 postfix 在挂（PatchInfo.Postfixes）②我方
@@ -103,6 +104,7 @@ internal static class ArrowTowerModel
                 ? "Harmony postfix LoadGameObject×3(miss→supply, __result ref 已核验)"
                 : "POSTFIX 未在挂/回写核验失败（interop 漂移？）——实机将显示官方兜底盒";
             EndlessGuardPlugin.Trace("[Tower] model prefab built (parts=" + CountDescendants(Template.transform)
+                                     + ", collider=Box(0.9,1.9,0.9)@y0.95"
                                      + ", via=" + via + ")");
         }
         catch (Exception e)
@@ -224,6 +226,7 @@ internal static class ArrowTowerModel
             inst = instObj == null ? null : instObj.TryCast<GameObject>();
             if (inst == null) return fallback;
             inst.SetActive(true);                                            // 镜像官方命中路径（SetActive(true)）
+            EnsureSelectableCollider(inst);                                  // fixwave2：选择碰撞体兜底（正常=零写）
             if (root != null)
             {
                 inst.transform.SetParent(root.transform, worldStays);        // 重载1 命中路径镜像
@@ -485,6 +488,36 @@ internal static class ArrowTowerModel
             Box(new Vector3(0.014f, 0.05f, 0.014f), P(x, 0.055f, 0.075f), ArrowShaft, h); // 露箭尾×3
         foreach (var x in tailX)
             Box(new Vector3(0.018f, 0.02f, 0.018f), P(x, 0.09f, 0.075f), FletchCream, h); // 箭尾羽帽×3
+
+        // ── 选择碰撞体（fixwave2，playtest 实证缺它=塔无法点选/搬动/卸装——官方选取走物理射线，
+        // 官方设备模型全部可射线命中）：根上唯一 BoxCollider，罩住塔身（占地 1×1=一格，高 1.9；
+        // 旗杆/顶饰球略超出不计入，命中体不必贴满视觉件）。子物件图元的 Collider 在 Box/Ball/Pyramid
+        // 里逐个拆除（防 FSM 相争的旧裁定只针对散件碰撞体；根上这一个罩体=官方同款可选中形态）。
+        var col = Template.AddComponent<BoxCollider>();
+        col.size = new Vector3(0.9f, 1.9f, 0.9f);
+        col.center = new Vector3(0f, 0.95f, 0f);
+    }
+
+    /// <summary>供给实例的选择碰撞体兜底（fixwave2）：Instantiate 原样带模板 BoxCollider；此处只兜
+    /// 模板重建/异常半途等边角态缺 Collider 的实例（补同一个尺寸/中心，一次性 trace）。正常路径
+    /// 一次组件存在性检查即出，零写。</summary>
+    private static bool _colliderFixTraced;
+
+    private static void EnsureSelectableCollider(GameObject inst)
+    {
+        try
+        {
+            if (inst == null || inst.GetComponent<BoxCollider>() != null) return;
+            var col = inst.AddComponent<BoxCollider>();
+            col.size = new Vector3(0.9f, 1.9f, 0.9f);
+            col.center = new Vector3(0f, 0.95f, 0f);
+            if (!_colliderFixTraced)
+            {
+                _colliderFixTraced = true;
+                EndlessGuardPlugin.Trace("[Tower] collider re-added on supplied instance (模板态异常?)");
+            }
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] collider: " + e.Message); }
     }
 
     // ── 图元/网格小工具 ────────────────────────────────────────────────────────────
@@ -621,15 +654,18 @@ internal static class ArrowTowerModel
         return mat;
     }
 
-    /// <summary>底材质四级降级链（F2 改版，2026-10-31 playtest 实证旧②在 IL2CPP 全空）：
+    /// <summary>底材质四级降级链（F2 改版 + fixwave2 克隆源卫生化）：
     /// ①场景内已放置受追踪设备的 renderer 材质克隆（供给时刻设备必在场——AgentManager 直达，
     ///画风自动匹配）→ ②场景任意 URP renderer（FindObjectOfType，战斗场景 3D 物体兜住）→
     /// ③Shader.Find 链（SimpleLit→Lit；IL2CPP 加密 bundle 下常 null，仅留作兜）→
-    /// ④Sprites/Default（内置必在，_Color 染色）。每级 trace 命中路径与 shader 名。</summary>
+    /// ④Sprites/Default（内置必在，_Color 染色）。每级 trace 命中路径与 shader 名。
+    /// fixwave2 源卫生（playtest 实证旧①选中电锯的 Particles/Unlit renderer → 克隆出透明幽灵塔）：
+    /// 候选材质必须"不透明 Lit"——shader 名含 Particles/Unlit/Transparent 一票否决 + renderQueue&lt;2450
+    ///（2450=AlphaTest 起始，透明家族整体排除）；候选设备偏好序 沙包36001 → 电锯36004 → 其余。</summary>
     private static Material MakeBaseMaterial()
     {
-        // ① 已放置设备克隆（F2 核心）：迭代在场受追踪家具 → TransformComponent.transform 后代
-        //    第一个 URP+_BaseColor renderer → 克隆去贴图/强不透明
+        // ① 已放置设备克隆（F2 核心）：迭代在场受追踪家具（偏好序 36001→36004→其余）→ 候选 renderer
+        //    打分取最优 → 克隆去贴图/强不透明四件套（CloneStripped）
         try
         {
             if (GameCore.HotUpdate.BaseSingleton<BattleLogicWorld>.IsInstanceCreated)
@@ -637,6 +673,8 @@ internal static class ArrowTowerModel
                 var all = GameCore.HotUpdate.BaseSingleton<BattleLogicWorld>.Instance?._AgentManager?.GetAllAgent();
                 if (all != null)
                 {
+                    Renderer bestR = null;
+                    int bestCfg = 0, bestPref = int.MaxValue;
                     for (int i = 0; i < all.Count; i++)
                     {
                         Furniture f = null;
@@ -648,11 +686,19 @@ internal static class ArrowTowerModel
                         }
                         catch { continue; }   // 单代理病态不拖垮取材
                         if (f == null || !DeviceXpMath.IsTrackedDevice(f.AgentConfigId)) continue;
-                        var r = FirstUrpRenderer(TransformOf(f)?.transform);
+                        var baseCfg = DeviceXpMath.BaseCfgOf(f.AgentConfigId);
+                        var pref = CloneSourcePref(baseCfg);
+                        if (pref >= bestPref) continue;                 // 已有更优设备，不再深扫
+                        var r = FirstCloneSourceRenderer(TransformOf(f)?.transform);
                         if (r == null) continue;
-                        var m = CloneStripped(r.sharedMaterial);
-                        EndlessGuardPlugin.Trace("[Tower] material cloned from placed device cfg=" + f.AgentConfigId
-                                                 + " shader=" + r.sharedMaterial.shader.name);
+                        bestR = r; bestCfg = baseCfg; bestPref = pref;  // 偏好序打分（同分后见者不越位）
+                    }
+                    if (bestR != null)
+                    {
+                        var m = CloneStripped(bestR.sharedMaterial);
+                        EndlessGuardPlugin.Trace("[Tower] material cloned from placed device cfg=" + bestCfg
+                                                 + " shader=" + bestR.sharedMaterial.shader.name
+                                                 + " queue=" + bestR.sharedMaterial.renderQueue);
                         return m;
                     }
                 }
@@ -660,12 +706,12 @@ internal static class ArrowTowerModel
         }
         catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] mat device-clone: " + e.Message); }
 
-        // ② 场景任意 URP renderer（旧路径，保留为次级）
+        // ② 场景任意 URP renderer（旧路径，保留为次级；fixwave2 同样过不透明 Lit 闸）
         try
         {
             var r = Object.FindObjectOfType(Il2CppType.Of<Renderer>(), false)?.TryCast<Renderer>();
             var src = r != null ? r.sharedMaterial : null;
-            if (src != null && IsUrpShader(src.shader) && src.HasProperty("_BaseColor"))
+            if (IsCloneSourceMaterial(src))
             {
                 var m = CloneStripped(src);
                 EndlessGuardPlugin.Trace("[Tower] material cloned from scene renderer (shader=" + src.shader.name + ")");
@@ -690,11 +736,43 @@ internal static class ArrowTowerModel
         return new Material(Shader.Find("Sprites/Default"));
     }
 
-    /// <summary>克隆源材质并抹成可染纯色：强不透明（_Surface=0）+ 抹 _BaseMap/_MainTex。</summary>
+    /// <summary>克隆源设备偏好序（fixwave2；brief 定：沙包 36001 最优，电锯 36004 身体次之，其余再后）。
+    /// 返回值越小越优。</summary>
+    private static int CloneSourcePref(int baseCfg) =>
+        baseCfg == 36001 ? 0 : baseCfg == 36004 ? 1 : 2;
+
+    /// <summary>透明/特效家族一票否决子串（fixwave2；shader 名不区分大小写匹配）。</summary>
+    private static readonly string[] BadShaderSubstrings = { "Particles", "Unlit", "Transparent" };
+
+    /// <summary>renderQueue 闸（fixwave2）：≥2450（Unity AlphaTest 起，Transparent 3000）一律不取。</summary>
+    private const int OpaqueQueueLimit = 2450;
+
+    /// <summary>候选克隆材质闸（fixwave2 源卫生）：URP Lit（非 Particles/Unlit/Transparent 家族）+
+    /// renderQueue&lt;2450 + 可染（_BaseColor）。</summary>
+    private static bool IsCloneSourceMaterial(Material m)
+    {
+        try
+        {
+            if (m == null || !IsUrpShader(m.shader) || !m.HasProperty("_BaseColor")) return false;
+            var n = m.shader.name;
+            foreach (var bad in BadShaderSubstrings)
+                if (n.IndexOf(bad, StringComparison.OrdinalIgnoreCase) >= 0) return false;
+            return m.renderQueue < OpaqueQueueLimit;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>克隆源材质并抹成可染纯色：强不透明四件套（_Surface=0 + _SrcBlend=1/_DstBlend=0/_ZWrite=1 +
+    /// renderQueue=2000）+ 抹 _BaseMap/_MainTex。源已被 IsCloneSourceMaterial 闸过，此处是保险定格
+    ///（克隆件无论源态一律落 Geometry 不透明）。</summary>
     private static Material CloneStripped(Material src)
     {
         var m = new Material(src);
-        if (m.HasProperty("_Surface")) m.SetFloat("_Surface", 0f);     // 保险：强制不透明
+        if (m.HasProperty("_Surface")) m.SetFloat("_Surface", 0f);     // URP 不透明面
+        if (m.HasProperty("_SrcBlend")) m.SetFloat("_SrcBlend", 1f);   // One
+        if (m.HasProperty("_DstBlend")) m.SetFloat("_DstBlend", 0f);   // Zero
+        if (m.HasProperty("_ZWrite")) m.SetFloat("_ZWrite", 1f);       // 写深度（透明幽灵的根治）
+        m.renderQueue = 2000;                                          // Geometry 队列
         if (m.HasProperty("_BaseMap")) m.SetTexture("_BaseMap", null); // 抹掉源贴图，纯色可染
         if (m.HasProperty("_MainTex")) m.SetTexture("_MainTex", null);
         return m;
@@ -714,8 +792,9 @@ internal static class ArrowTowerModel
         catch { return null; }
     }
 
-    /// <summary>后代第一个 URP+_BaseColor renderer（深度优先；官方家具模型 renderer 挂子物体下）。</summary>
-    private static Renderer FirstUrpRenderer(Transform t)
+    /// <summary>后代第一个过克隆源闸的 renderer（深度优先；官方家具模型 renderer 挂子物体下）。
+    /// fixwave2：闸=IsCloneSourceMaterial（URP Lit+不透明+可染），不再只看 URP+_BaseColor。</summary>
+    private static Renderer FirstCloneSourceRenderer(Transform t)
     {
         if (t == null) return null;
         for (int i = 0; i < t.childCount; i++)
@@ -726,15 +805,11 @@ internal static class ArrowTowerModel
             try
             {
                 r = c.GetComponent<Renderer>();
-                if (r != null)
-                {
-                    var sm = r.sharedMaterial;
-                    if (sm == null || !IsUrpShader(sm.shader) || !sm.HasProperty("_BaseColor")) r = null;
-                }
+                if (r != null && !IsCloneSourceMaterial(r.sharedMaterial)) r = null;
             }
             catch { r = null; }
             if (r != null) return r;
-            var sub = FirstUrpRenderer(c);
+            var sub = FirstCloneSourceRenderer(c);
             if (sub != null) return sub;
         }
         return null;

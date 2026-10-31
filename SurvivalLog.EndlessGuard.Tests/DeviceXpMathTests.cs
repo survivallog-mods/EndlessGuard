@@ -142,7 +142,7 @@ public class DeviceXpMathTests
         Assert.Equal(50, DeviceXpMath.AwardForKill(100, 0.5f));   // 击杀追加 50%（spec §3.1）
     }
 
-    // ---- 设备名单 / 受击缩放门 ----
+    // ---- 设备名单（含派生行）/ 派生行身份（fixwave2：升级=换配置行） ----
 
     [Theory]
     [InlineData(36001, true)]   // 沙包
@@ -160,96 +160,101 @@ public class DeviceXpMathTests
     }
 
     [Theory]
-    [InlineData(true, false)]    // 修理不算受击，不缩放
-    [InlineData(false, true)]
-    public void ShouldScaleIncomingDamage_IsNotRepair(bool isRepair, bool expected)
+    [InlineData(99112, 36001, 2)]    // 沙包 Lv2（typeIdx=1）
+    [InlineData(99115, 36001, 5)]    // 沙包 Lv5
+    [InlineData(99122, 36002, 2)]    // 尖刺 Lv2（typeIdx=2）
+    [InlineData(99132, 36003, 2)]    // 电网 Lv2（typeIdx=3）
+    [InlineData(99143, 36004, 3)]    // 电锯 Lv3（typeIdx=4）
+    [InlineData(99145, 36004, 5)]
+    [InlineData(99152, 99005, 2)]    // 箭塔 Lv2（typeIdx=5）
+    [InlineData(99155, 99005, 5)]    // 箭塔 Lv5
+    public void TrySplitDerivedRow_DecodesScheme(int rowId, int expectedBase, int expectedLv)
     {
-        Assert.Equal(expected, DeviceXpMath.ShouldScaleIncomingDamage(isRepair));
+        Assert.True(DeviceXpMath.TrySplitDerivedRow(rowId, out var baseCfg, out var lv));
+        Assert.Equal(expectedBase, baseCfg);
+        Assert.Equal(expectedLv, lv);
+        Assert.Equal(expectedLv, DeviceXpMath.LevelOfDerivedRow(rowId));
+        Assert.Equal(expectedBase, DeviceXpMath.BaseCfgOf(rowId));
+        Assert.True(DeviceXpMath.IsDerivedRow(rowId));
+        Assert.True(DeviceXpMath.IsTrackedDevice(rowId));
     }
-
-    // ---- Task 4 巡检漂移判定（读档重放/幂等校准的纯判定核） ----
 
     [Theory]
-    [InlineData(12, 3, 12, false)]   // Lv3 目标=12×1.15²≈15.87→16；live=12（读档被官方重置）→漂移
-    [InlineData(12, 3, 16, true)]    // live 已是目标 → 无漂移（幂等：不写不 trace）
-    [InlineData(12, 3, 15, false)]   // live=15 vs 目标 16 → 漂移
-    public void AttackDrifts_ComparesAgainstLevelTarget(int baseAtk, int lv, int liveAtk, bool expectedNoDrift)
+    [InlineData(99111)]   // lv=1 不是合法派生行（lv1=基础行本身）
+    [InlineData(99116)]   // lv=6 越界（上限 5）
+    [InlineData(99101)]   // typeIdx=0 段
+    [InlineData(99160)]   // typeIdx=6 越界
+    [InlineData(99120)]   // lv=0
+    [InlineData(99121)]   // lv=1 段（22 前的 21 一样非法）
+    [InlineData(99005)]   // 基础行不是派生行
+    [InlineData(36001)]
+    [InlineData(0)]
+    [InlineData(99006)]
+    public void TrySplitDerivedRow_RejectsNonScheme(int id)
     {
-        Assert.Equal(expectedNoDrift, !DeviceXpMath.AttackDrifts(baseAtk, lv, liveAtk));
+        Assert.False(DeviceXpMath.TrySplitDerivedRow(id, out _, out _));
+        Assert.Equal(0, DeviceXpMath.LevelOfDerivedRow(id));
+        Assert.False(DeviceXpMath.IsDerivedRow(id));
+        Assert.Equal(id, DeviceXpMath.BaseCfgOf(id));   // 非派生行透传（账本/悬停归一口径）
+    }
+
+    [Theory]
+    [InlineData(36001, 1, 36001)]    // lv1=基础行本身（不换行）
+    [InlineData(36001, 2, 99112)]
+    [InlineData(36001, 5, 99115)]
+    [InlineData(36002, 3, 99123)]
+    [InlineData(36003, 4, 99134)]
+    [InlineData(36004, 2, 99142)]
+    [InlineData(36004, 5, 99145)]
+    [InlineData(99005, 1, 99005)]    // 箭塔 lv1=99005 本身
+    [InlineData(99005, 2, 99152)]
+    [InlineData(99005, 5, 99155)]
+    public void RowIdFor_MapsBaseAndLevelToRow(int baseCfg, int level, int expected)
+    {
+        Assert.Equal(expected, DeviceXpMath.RowIdFor(baseCfg, level));
+    }
+
+    [Theory]
+    [InlineData(36001, 6)]    // 越级（上限 5）
+    [InlineData(36005, 2)]    // 非名单设备没有派生行
+    [InlineData(99006, 3)]
+    [InlineData(0, 2)]
+    public void RowIdFor_InvalidBaseOrLevel_ReturnsMinusOne(int baseCfg, int level)
+    {
+        Assert.Equal(-1, DeviceXpMath.RowIdFor(baseCfg, level));
     }
 
     [Fact]
-    public void IntervalDrifts_EqualWithinEpsilon()
+    public void RowIdFor_NonPositiveLevel_NormalizesToBaseRow()
     {
-        var target = DeviceXpMath.TargetInterval(2f, 3);        // 2×0.92²≈1.6928
-        Assert.False(DeviceXpMath.IntervalDrifts(2f, 3, target));            // 写回值=目标 → 无漂移
-        Assert.False(DeviceXpMath.IntervalDrifts(2f, 3, target + 5e-5f));    // 容差内抖动 → 无漂移（防永久 recal）
-        Assert.True(DeviceXpMath.IntervalDrifts(2f, 3, 2f));                 // 被官方重置回原厂 → 漂移
+        // 病态账本（lv=0）防御：≤1 一律归一到基础行（巡检按"无成长"处理，不会因 -1 卡死补写）
+        Assert.Equal(36001, DeviceXpMath.RowIdFor(36001, 0));
+        Assert.Equal(36001, DeviceXpMath.RowIdFor(36001, -3));
     }
 
     [Fact]
-    public void TargetRangeSqr_RoundTripsApplyLevelWrite()
+    public void RowIdFor_RoundTripsThroughTrySplit()
     {
-        // 写回口径自洽：ApplyLevel 写 TargetRangeSqr(base,lv)，巡检判 live≠同一函数 → 必收敛
-        var b = 3.0f * 3.0f;                                    // 基线 RangeSqr=9（3 格）
-        var lv5 = DeviceXpMath.TargetRangeSqr(b, 5);            // 3+4×0.55=5.2 → 5.2²=27.04
-        Assert.InRange(lv5, 27.03f, 27.05f);
-        Assert.False(DeviceXpMath.RangeDrifts(b, 5, lv5));      // 写回后读回 → 无漂移
-        Assert.True(DeviceXpMath.RangeDrifts(b, 5, b));         // 重置回原厂 → 漂移
-        Assert.Equal(0f, DeviceXpMath.TargetRangeSqr(-1f, 1));  // 负基线钳 0（防 NaN 传染；Lv1 目标=0）
+        foreach (var baseCfg in DeviceXpMath.TrackedBaseIds)
+            for (int lv = 2; lv <= 5; lv++)
+            {
+                var row = DeviceXpMath.RowIdFor(baseCfg, lv);
+                Assert.True(DeviceXpMath.TrySplitDerivedRow(row, out var back, out var backLv));
+                Assert.Equal(baseCfg, back);
+                Assert.Equal(lv, backLv);
+            }
     }
 
-    [Fact]
-    public void MaxHpDrifts_OnlyLowSideFlags()
+    [Theory]
+    [InlineData("机械电锯", 3, "机械电锯 Lv.3")]
+    [InlineData("箭塔", 2, "箭塔 Lv.2")]
+    [InlineData("沙包", 5, "沙包 Lv.5")]
+    public void WithLevelSuffix_AppendsLevel(string baseName, int lv, string expected)
     {
-        var b = 100; var step = DeviceXpMath.StepAbs(b, 0.15f);  // 15（箭塔比率，spec §4.1）
-        Assert.True(DeviceXpMath.MaxHpDrifts(b, step, 3, 100));   // 重置回原厂 100 < 目标 130 → 漂移
-        Assert.False(DeviceXpMath.MaxHpDrifts(b, step, 3, 130));  // 已达目标 → 无漂移
-        Assert.False(DeviceXpMath.MaxHpDrifts(b, step, 3, 140));  // 高于目标不判（ApplyLevel 只加不减，判了永不收敛只刷 trace）
+        Assert.Equal(expected, DeviceXpMath.WithLevelSuffix(baseName, lv));
     }
 
-    // ---- 评审 I1：校准熔断器（连续 3 次不收敛即停，封死潜在回血循环） ----
-
-    [Fact]
-    public void RecalFuse_TripsAfterThreeConsecutiveTriggers()
-    {
-        var fuse = new RecalFuse();
-        Assert.True(fuse.OnTrigger());    // 第 1 次写
-        Assert.True(fuse.OnTrigger());    // 第 2 次写
-        Assert.True(fuse.OnTrigger());    // 第 3 次写（熔断在本次计满后生效）
-        Assert.False(fuse.OnTrigger());   // 第 4 次起压制（不再写）
-        Assert.False(fuse.OnTrigger());   // 持续压制（本会话内不解除）
-        Assert.False(fuse.OnTrigger());
-    }
-
-    [Fact]
-    public void RecalFuse_ConvergeResetsStreak_ButNotTrip()
-    {
-        var fuse = new RecalFuse();
-        fuse.OnTrigger(); fuse.OnTrigger(); fuse.OnTrigger();   // 计满熔断
-        fuse.OnConverged();                                     // 某步无漂移：连续性归零
-        Assert.False(fuse.OnTrigger());                         // 但熔断态保持——"本会话内暂停"
-        var fresh = new RecalFuse();
-        fresh.OnTrigger(); fresh.OnTrigger();
-        fresh.OnConverged();                                    // 未熔断时收敛：旧连续计数不牵连下一轮
-        Assert.True(fresh.OnTrigger());                         // 重新累计（新一轮第 1 次）
-        Assert.True(fresh.OnTrigger());                         // 第 2 次
-        Assert.True(fresh.OnTrigger());                         // 第 3 次
-        Assert.False(fresh.OnTrigger());                        // 新一轮第 4 次压制
-    }
-
-    [Fact]
-    public void RecalFuse_ResetLiftsTrip()
-    {
-        var fuse = new RecalFuse();
-        fuse.OnTrigger(); fuse.OnTrigger(); fuse.OnTrigger();
-        Assert.False(fuse.OnTrigger());   // 已压制
-        fuse.Reset();                     // 槽切换/设备重建（换 id 天然新态）
-        Assert.True(fuse.OnTrigger());    // 计数复位后恢复校准
-    }
-
-    // ---- Task 9 cfg 接线：成长步长/等级上限参数化（可选参数默认值=spec §3.5 定值；cfg 换值同式复算，
-    //      ApplyLevel 与巡检漂移判定共用同一传参 → 必收敛）----
+    // ---- Task 9 cfg 接线：成长步长/等级上限参数化（可选参数默认值=spec §3.5 定值）----
 
     [Fact]
     public void TargetAttack_CustomStep_Compounds()
@@ -271,20 +276,9 @@ public class DeviceXpMathTests
     [Fact]
     public void TargetRange_CustomStep_Linear()
     {
-        // cfg TowerRangeStep=0.70：3+4×0.7=5.8；RangeSqr 换算与漂移判定同源自洽
+        // cfg TowerRangeStep=0.70：3+4×0.7=5.8（箭塔派生行 AttackRange 用同一换算）
         Assert.InRange(DeviceXpMath.TargetRange(3.0f, 5, 0.70f), 5.79f, 5.81f);
-        var sqr = DeviceXpMath.TargetRangeSqr(9f, 5, 0.70f);           // 5.8²=33.64
-        Assert.InRange(sqr, 33.63f, 33.65f);
-        Assert.False(DeviceXpMath.RangeDrifts(9f, 5, sqr, 0.70f));     // 写回=判定同参 → 无漂移
-        Assert.True(DeviceXpMath.RangeDrifts(9f, 5, 9f, 0.70f));       // 重置回原厂 → 漂移
-    }
-
-    [Fact]
-    public void AttackDrifts_CustomStep_UsesSameTarget()
-    {
-        // cfg WeaponAtkStep=0.20 时目标=10×1.2²→14：live=14 无漂移（默认步长的目标 13 反而漂移）
-        Assert.False(DeviceXpMath.AttackDrifts(10, 3, 14, 0.20f));
-        Assert.True(DeviceXpMath.AttackDrifts(10, 3, 13, 0.20f));
+        Assert.Equal(3.0f, DeviceXpMath.TargetRange(3.0f, 1, 0.70f));   // Lv1 恒=基础射程
     }
 
     [Fact]
