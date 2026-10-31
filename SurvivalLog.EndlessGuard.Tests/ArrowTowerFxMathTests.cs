@@ -196,4 +196,32 @@ public class ArrowTowerFxMathTests
         Assert.Equal(0.2f, ArrowTowerFxMath.ArrowHitRadius);
         Assert.Equal(8, ArrowTowerFxMath.MaxArrows);
     }
+
+    // ---- fixwave3 W3B 木件色调抖动桶（VarBucket：纯函数契约） ----
+
+    [Fact]
+    public void VarBucket_Deterministic_AlwaysInRange012()
+    {
+        // 决定性与值域：同入参恒同桶；任意（含负/小数）坐标落 {0,1,2}
+        for (var x = -3f; x <= 3f; x += 0.37f)
+            for (var y = -3f; y <= 3f; y += 0.41f)
+                for (var z = -3f; z <= 3f; z += 0.43f)
+                {
+                    var b = ArrowTowerFxMath.VarBucket(x, y, z);
+                    Assert.InRange(b, 0, 2);
+                    Assert.Equal(b, ArrowTowerFxMath.VarBucket(x, y, z));
+                }
+    }
+
+    [Fact]
+    public void VarBucket_AllThreeBucketsReachable_AcrossLattice()
+    {
+        // 雪崩性：0..9 的格点上三个桶都得出现（否则 ±3% 抖动退化成单色/双色）
+        var seen = new bool[3];
+        for (var x = 0; x < 10; x++)
+            for (var y = 0; y < 10; y++)
+                for (var z = 0; z < 10; z++)
+                    seen[ArrowTowerFxMath.VarBucket(x, y, z)] = true;
+        Assert.True(seen[0] && seen[1] && seen[2], $"buckets: {seen[0]},{seen[1]},{seen[2]}");
+    }
 }

@@ -25,7 +25,8 @@ namespace SurvivalLog.EndlessGuard;
 /// AgentModelManager.GetModelByColliderId → AgentModel；官方家具模型全链处于 GameLayer.Furniture 层，
 /// 我方图元实例默认 Default(0) 层在掩码外=「碰撞体在而射线永不命中」。镜像：供给实例全链递归设为
 /// GameLayer.Furniture（读不到退层名，再退不动+trace）；一次性取证 dump 在 TowerModelDiag（官方设备
-/// 与我方塔各一次，含 AgentModelManager 注册探针）。
+/// 与我方塔各一次，含 AgentModelManager 注册探针）。W3B：程序化木纹/瓦纹贴图（TowerTextures）按
+/// 贴图角色挂材质（Mat(color, role)），木件 ±3% 亮度桶抖动破均匀感（ArrowTowerFxMath.VarBucket）。
 ///
 /// ══ Spike 结论（2026-10-31，对 10-29 现行 build 实测：Il2CppDumper 重跑现行 GameAssembly.dll +
 /// global-metadata.dat 得现行 script.json，Iced（suite/tools/disasm_tool）全链逐条核读）══
@@ -83,7 +84,7 @@ internal static class ArrowTowerModel
 
     internal static GameObject Template;                 // 隐藏模板（DontDestroyOnLoad+失活），只 Clone 不直发
     private static Material _baseMat;                    // 三级降级链产物（见 MakeBaseMaterial；F2 可后升级）
-    private static readonly Dictionary<Color, Material> Mats = new();
+    private static readonly Dictionary<(Color, TowerTextures.Role), Material> Mats = new();
     private static bool _built, _armed, _failTraced, _suppliedTraced;
     private static int _supplyTraced;                    // F3：前 3 次 supply 的缩放/高度自证计数
 
@@ -375,7 +376,8 @@ internal static class ArrowTowerModel
     private static bool IsUrpShader(Shader sh) =>
         sh != null && sh.name.IndexOf("Universal Render Pipeline", StringComparison.OrdinalIgnoreCase) >= 0;
 
-    /// <summary>重染后代（F2 升级路径）：每 renderer 的旧材质读回色值 → Mat(色) 从新底重建并回挂。
+    /// <summary>重染后代（F2 升级路径）：每 renderer 的旧材质读回色值 → Mat(色, 旧材质反推的角色) 从新底
+    /// 重建并回挂——fixwave3 W3B 起角色感知，贴图与平铺在材质升级（Sprites/Default→URP）后原样保留。
     /// Template 与已放置塔根共用（结构件材质全走 Mats 缓存这一条路）。internal=ArrowTowerFx 回调重染已放置塔。</summary>
     internal static void RetintDescendants(Transform t)
     {
@@ -385,7 +387,10 @@ internal static class ArrowTowerModel
             if (c == null) continue;
             var r = c.GetComponent<MeshRenderer>();
             if (r != null && r.sharedMaterial != null)
-                r.sharedMaterial = Mat(ColorOf(r.sharedMaterial));
+            {
+                var old = r.sharedMaterial;
+                r.sharedMaterial = Mat(ColorOf(old), RoleOfMat(old));
+            }
             RetintDescendants(c);
         }
     }
@@ -405,95 +410,99 @@ internal static class ArrowTowerModel
     // ══════════════════════════════ 模板拼装（spec §4.3 结构件清单）═════════════════════════════
 
     /// <summary>自底向上拼塔（约 92 件，全 Cube/Sphere 图元去 Collider + 手写 4 棱锥/燕尾旗网格）。
-    /// 静态件全为根直接子物体；旋转部弩机为子物体「Head」；旗子为「Flag」。</summary>
+    /// 静态件全为根直接子物体；旋转部弩机为子物体「Head」；旗子为「Flag」。fixwave3 W3B：木件按
+    /// 大面/小件挂 PlankBig/PlankSmall 程序化木纹，塔顶挂 Roof 瓦纹（铁/石/旗/羽 Flat 纯色）。</summary>
     private static void BuildTemplate()
     {
         Template = new GameObject(ArrowTower.ResName);
         Template.SetActive(false);                       // 模板永不直发（Supply 每次派发 clone 并转正）
         Object.DontDestroyOnLoad(Template);
         var t = Template.transform;
+        var PB = TowerTextures.Role.PlankBig;            // 木纹大面 (1.5,1.5)
+        var PS = TowerTextures.Role.PlankSmall;          // 木纹小件 (1,1)
+        var RF = TowerTextures.Role.Roof;                // 瓦纹 (1.5,1.5)
 
-        // ── 石砌基座 y0-0.28（0.92 方主体 + 0.98 压顶沿 + 四角石块 0.16）──
+        // ── 石砌基座 y0-0.28（0.92 方主体 + 0.98 压顶沿 + 四角石块 0.16；石件 Flat 纯色）──
         Box(new Vector3(0.92f, 0.22f, 0.92f), P(0, 0.11f, 0), StoneLight, t);
         Box(new Vector3(0.98f, 0.06f, 0.98f), P(0, 0.25f, 0), StoneDark, t);
         foreach (var (x, z) in new[] { (-0.38f, -0.38f), (0.38f, -0.38f), (-0.38f, 0.38f), (0.38f, 0.38f) })
             Box(new Vector3(0.16f, 0.28f, 0.16f), P(x, 0.14f, z), StoneDark, t);
 
         // ── 木塔身三段收分 y0.28-1.07（宽 0.76/0.70/0.64 交替深浅）──
-        Box(new Vector3(0.76f, 0.26f, 0.76f), P(0, 0.41f, 0), WoodMid, t);
-        Box(new Vector3(0.70f, 0.26f, 0.70f), P(0, 0.67f, 0), WoodLight, t);
-        Box(new Vector3(0.64f, 0.27f, 0.64f), P(0, 0.935f, 0), WoodMid, t);
+        Box(new Vector3(0.76f, 0.26f, 0.76f), P(0, 0.41f, 0), WoodMid, t, role: PB);
+        Box(new Vector3(0.70f, 0.26f, 0.70f), P(0, 0.67f, 0), WoodLight, t, role: PB);
+        Box(new Vector3(0.64f, 0.27f, 0.64f), P(0, 0.935f, 0), WoodMid, t, role: PB);
         foreach (var (x, z) in new[] { (-0.35f, -0.35f), (0.35f, -0.35f), (-0.35f, 0.35f), (0.35f, 0.35f) })
-            Box(new Vector3(0.06f, 0.79f, 0.06f), P(x, 0.675f, z), WoodDark, t);          // 四角柱
-        Box(new Vector3(0.80f, 0.04f, 0.80f), P(0, 0.54f, 0), WoodDark, t);               // 段间横带×2
-        Box(new Vector3(0.74f, 0.04f, 0.74f), P(0, 0.80f, 0), WoodDark, t);
-        Box(new Vector3(0.045f, 0.66f, 0.075f), P(-0.385f, 0.675f, 0), WoodDark, t, E(40, 0, 0));   // 背面 X 斜撑
-        Box(new Vector3(0.045f, 0.66f, 0.075f), P(-0.385f, 0.675f, 0), WoodDark, t, E(-40, 0, 0));
-        Box(new Vector3(0.035f, 0.10f, 0.04f), P(0.385f, 0.46f, 0), IronDark, t);         // 正面射孔×3
+            Box(new Vector3(0.06f, 0.79f, 0.06f), P(x, 0.675f, z), WoodDark, t, role: PS);          // 四角柱
+        Box(new Vector3(0.80f, 0.04f, 0.80f), P(0, 0.54f, 0), WoodDark, t, role: PB);               // 段间横带×2
+        Box(new Vector3(0.74f, 0.04f, 0.74f), P(0, 0.80f, 0), WoodDark, t, role: PB);
+        Box(new Vector3(0.045f, 0.66f, 0.075f), P(-0.385f, 0.675f, 0), WoodDark, t, E(40, 0, 0), PS);   // 背面 X 斜撑
+        Box(new Vector3(0.045f, 0.66f, 0.075f), P(-0.385f, 0.675f, 0), WoodDark, t, E(-40, 0, 0), PS);
+        Box(new Vector3(0.035f, 0.10f, 0.04f), P(0.385f, 0.46f, 0), IronDark, t);         // 正面射孔×3（铁 Flat）
         Box(new Vector3(0.035f, 0.10f, 0.04f), P(0.385f, 0.70f, 0), IronDark, t);
         Box(new Vector3(0.035f, 0.10f, 0.04f), P(0.385f, 0.90f, 0), IronDark, t);
-        Box(new Vector3(0.03f, 0.72f, 0.045f), P(-0.40f, 0.64f, -0.09f), WoodDark, t);    // 背面爬梯（2 轨）
-        Box(new Vector3(0.03f, 0.72f, 0.045f), P(-0.40f, 0.64f, 0.09f), WoodDark, t);
+        Box(new Vector3(0.03f, 0.72f, 0.045f), P(-0.40f, 0.64f, -0.09f), WoodDark, t, role: PS);    // 背面爬梯（2 轨）
+        Box(new Vector3(0.03f, 0.72f, 0.045f), P(-0.40f, 0.64f, 0.09f), WoodDark, t, role: PS);
         for (var i = 0; i < 7; i++)                                                       // 7 踏
-            Box(new Vector3(0.03f, 0.035f, 0.16f), P(-0.40f, 0.32f + i * 0.10f, 0), WoodLight, t);
+            Box(new Vector3(0.03f, 0.035f, 0.16f), P(-0.40f, 0.32f + i * 0.10f, 0), WoodLight, t, role: PS);
 
         // ── 挑台托架×4 + 平台 y1.11-1.19（1.04 见方，挑出塔身）──
         foreach (var (x, z) in new[] { (-0.40f, -0.40f), (0.40f, -0.40f), (-0.40f, 0.40f), (0.40f, 0.40f) })
-            Box(new Vector3(0.16f, 0.05f, 0.16f), P(x, 1.095f, z), WoodDark, t);
-        Box(new Vector3(1.04f, 0.08f, 1.04f), P(0, 1.15f, 0), WoodLight, t);
+            Box(new Vector3(0.16f, 0.05f, 0.16f), P(x, 1.095f, z), WoodDark, t, role: PS);
+        Box(new Vector3(1.04f, 0.08f, 1.04f), P(0, 1.15f, 0), WoodLight, t, role: PB);
 
         // ── 垛口护栏 y1.23-1.44（四边矮墙 0.1 高 + 每边 5 垛齿 + 檐角圆球×4）──
-        Box(new Vector3(1.04f, 0.10f, 0.06f), P(0, 1.28f, -0.49f), WoodMid, t);
-        Box(new Vector3(1.04f, 0.10f, 0.06f), P(0, 1.28f, 0.49f), WoodMid, t);
-        Box(new Vector3(0.06f, 0.10f, 0.92f), P(-0.49f, 1.28f, 0), WoodMid, t);
-        Box(new Vector3(0.06f, 0.10f, 0.92f), P(0.49f, 1.28f, 0), WoodMid, t);
+        Box(new Vector3(1.04f, 0.10f, 0.06f), P(0, 1.28f, -0.49f), WoodMid, t, role: PB);
+        Box(new Vector3(1.04f, 0.10f, 0.06f), P(0, 1.28f, 0.49f), WoodMid, t, role: PB);
+        Box(new Vector3(0.06f, 0.10f, 0.92f), P(-0.49f, 1.28f, 0), WoodMid, t, role: PB);
+        Box(new Vector3(0.06f, 0.10f, 0.92f), P(0.49f, 1.28f, 0), WoodMid, t, role: PB);
         var teeth = new[] { -0.416f, -0.208f, 0f, 0.208f, 0.416f };                       // 每边 5 垛齿
         foreach (var o in teeth)
         {
-            Box(new Vector3(0.10f, 0.11f, 0.06f), P(o, 1.385f, -0.49f), WoodDark, t);
-            Box(new Vector3(0.10f, 0.11f, 0.06f), P(o, 1.385f, 0.49f), WoodDark, t);
-            Box(new Vector3(0.06f, 0.11f, 0.10f), P(-0.49f, 1.385f, o), WoodDark, t);
-            Box(new Vector3(0.06f, 0.11f, 0.10f), P(0.49f, 1.385f, o), WoodDark, t);
+            Box(new Vector3(0.10f, 0.11f, 0.06f), P(o, 1.385f, -0.49f), WoodDark, t, role: PS);
+            Box(new Vector3(0.10f, 0.11f, 0.06f), P(o, 1.385f, 0.49f), WoodDark, t, role: PS);
+            Box(new Vector3(0.06f, 0.11f, 0.10f), P(-0.49f, 1.385f, o), WoodDark, t, role: PS);
+            Box(new Vector3(0.06f, 0.11f, 0.10f), P(0.49f, 1.385f, o), WoodDark, t, role: PS);
         }
         foreach (var (x, z) in new[] { (-0.49f, -0.49f), (0.49f, -0.49f), (-0.49f, 0.49f), (0.49f, 0.49f) })
-            Ball(0.10f, P(x, 1.45f, z), WoodLight, t);                                    // 檐角圆球×4
+            Ball(0.10f, P(x, 1.45f, z), WoodLight, t);                                    // 檐角圆球×4（Flat）
 
         // ── 四坡顶 y1.5-1.91（檐口 + 四短柱 + 4 棱锥手写网格 + 顶饰球）──
         foreach (var (x, z) in new[] { (-0.30f, -0.30f), (0.30f, -0.30f), (-0.30f, 0.30f), (0.30f, 0.30f) })
-            Box(new Vector3(0.05f, 0.07f, 0.05f), P(x, 1.475f, z), WoodDark, t);          // 四短柱
-        Box(new Vector3(0.92f, 0.05f, 0.92f), P(0, 1.52f, 0), Eave, t);                   // 檐口
-        Pyramid(0.66f, 0.36f, P(0, 1.55f, 0), TileRed, t, E(0, 0, 0));
+            Box(new Vector3(0.05f, 0.07f, 0.05f), P(x, 1.475f, z), WoodDark, t, role: PS);          // 四短柱
+        Box(new Vector3(0.92f, 0.05f, 0.92f), P(0, 1.52f, 0), Eave, t, role: PB);                   // 檐口
+        Pyramid(0.66f, 0.36f, P(0, 1.55f, 0), TileRed, t, E(0, 0, 0), RF);
         // （手写网格基座方角天然落在对角线上=四坡面正对四墙，等价「Cone(4) 转45°」的意图，不再额外转）
         Ball(0.07f, P(0, 1.945f, 0), IronDark, t);                                        // 顶饰球（评审口径 0.035 取半径）
 
-        // ── 旗杆 + 红燕尾旗（角柱外 0.52,·,0.52；Flag 子物体 T8 摆动）──
-        Box(new Vector3(0.025f, 0.80f, 0.025f), P(0.52f, 1.59f, 0.52f), WoodDark, t);
+        // ── 旗杆 + 红燕尾旗（角柱外 0.52,·,0.52；Flag 子物体 T8 摆动；旗面/旗杆球 Flat）──
+        Box(new Vector3(0.025f, 0.80f, 0.025f), P(0.52f, 1.59f, 0.52f), WoodDark, t, role: PS);
         Ball(0.06f, P(0.52f, 2.01f, 0.52f), IronDark, t);
         Flag(P(0.532f, 1.86f, 0.52f), FlagRed, t);
 
-        // ── 重型弩机 y1.28 平台中央 → 整件子物体「Head」（T8 旋转部）──
+        // ── 重型弩机 y1.28 平台中央 → 整件子物体「Head」（T8 旋转部；木件 PS，铁件 Flat）──
         var head = new GameObject("Head");
         head.transform.SetParent(t, false);
         head.transform.localPosition = P(0, 1.28f, 0);
         var h = head.transform;
         Box(new Vector3(0.10f, 0.10f, 0.10f), P(0, -0.04f, 0), IronDark, h);              // 枢轴柱
-        Box(new Vector3(0.46f, 0.05f, 0.07f), P(0.13f, 0.025f, 0), WoodMid, h);           // 托身（+x 朝前）
+        Box(new Vector3(0.46f, 0.05f, 0.07f), P(0.13f, 0.025f, 0), WoodMid, h, role: PS); // 托身（+x 朝前）
         Box(new Vector3(0.05f, 0.06f, 0.075f), P(0.02f, 0.025f, 0), IronDark, h);         // 铁件
         Box(new Vector3(0.30f, 0.025f, 0.03f), P(0.20f, 0.06f, 0), IronLight, h);         // 导轨
         Box(new Vector3(0.05f, 0.045f, 0.045f), P(0.30f, 0.065f, 0), IronDark, h);        // 弓脊
-        Box(new Vector3(0.03f, 0.03f, 0.24f), P(0.30f, 0.07f, 0.135f), WoodDark, h, E(-28.65f, 0, 0)); // 后掠双弓臂
-        Box(new Vector3(0.03f, 0.03f, 0.24f), P(0.30f, 0.07f, -0.135f), WoodDark, h, E(28.65f, 0, 0));
+        Box(new Vector3(0.03f, 0.03f, 0.24f), P(0.30f, 0.07f, 0.135f), WoodDark, h, E(-28.65f, 0, 0), PS); // 后掠双弓臂
+        Box(new Vector3(0.03f, 0.03f, 0.24f), P(0.30f, 0.07f, -0.135f), WoodDark, h, E(28.65f, 0, 0), PS);
         Ball(0.04f, P(0.30f, 0.127f, 0.24f), IronLight, h);                               // 铁帽×2
         Ball(0.04f, P(0.30f, 0.127f, -0.24f), IronLight, h);
         Box(new Vector3(0.008f, 0.008f, 0.48f), P(0.30f, 0.127f, 0), FletchCream, h);     // 弦
-        Box(new Vector3(0.30f, 0.02f, 0.02f), P(0.16f, 0.055f, 0), ArrowShaft, h);        // 上膛箭杆
+        Box(new Vector3(0.30f, 0.02f, 0.02f), P(0.16f, 0.055f, 0), ArrowShaft, h, role: PS);  // 上膛箭杆（W3B 木纹杆）
         Pyramid(0.02f, 0.06f, P(0.31f, 0.055f, 0), IronLight, h, E(0, 0, -90));           // 锥头（+x 朝前）
         Box(new Vector3(0.07f, 0.035f, 0.004f), P(0.055f, 0.055f, 0), FletchCream, h);    // 双羽
         Box(new Vector3(0.07f, 0.004f, 0.035f), P(0.055f, 0.055f, 0), FletchCream, h);
-        Box(new Vector3(0.16f, 0.05f, 0.05f), P(-0.06f, 0, 0.075f), WoodDark, h);         // 侧箭匣
+        Box(new Vector3(0.16f, 0.05f, 0.05f), P(-0.06f, 0, 0.075f), WoodDark, h, role: PS);   // 侧箭匣
         var tailX = new[] { -0.10f, -0.06f, -0.02f };
         foreach (var x in tailX)
-            Box(new Vector3(0.014f, 0.05f, 0.014f), P(x, 0.055f, 0.075f), ArrowShaft, h); // 露箭尾×3
+            Box(new Vector3(0.014f, 0.05f, 0.014f), P(x, 0.055f, 0.075f), ArrowShaft, h, role: PS);   // 露箭尾×3
         foreach (var x in tailX)
             Box(new Vector3(0.018f, 0.02f, 0.018f), P(x, 0.09f, 0.075f), FletchCream, h); // 箭尾羽帽×3
 
@@ -616,8 +625,10 @@ internal static class ArrowTowerModel
         return n;
     }
 
-    /// <summary>Cube 图元（去 Collider，localScale=尺寸，贴共享色材质）。internal=T8 箭矢模板复用。</summary>
-    internal static GameObject Box(Vector3 size, Vector3 pos, Color color, Transform parent, Vector3? euler = null)
+    /// <summary>Cube 图元（去 Collider，localScale=尺寸，贴共享色/角色材质；木/瓦角色按位置加 ±3% 亮度桶
+    /// 抖动破均匀感）。internal=T8 箭矢模板复用。</summary>
+    internal static GameObject Box(Vector3 size, Vector3 pos, Color color, Transform parent,
+        Vector3? euler = null, TowerTextures.Role role = TowerTextures.Role.Flat)
     {
         var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
         Object.DestroyImmediate(go.GetComponent<Collider>());
@@ -626,11 +637,11 @@ internal static class ArrowTowerModel
         tr.localPosition = pos;
         tr.localScale = size;
         if (euler.HasValue) tr.localEulerAngles = euler.Value;
-        go.GetComponent<MeshRenderer>().sharedMaterial = Mat(color);
+        go.GetComponent<MeshRenderer>().sharedMaterial = Mat(Varied(color, pos, role), role);
         return go;
     }
 
-    /// <summary>Sphere 图元（去 Collider，localScale=直径）。</summary>
+    /// <summary>Sphere 图元（去 Collider，localScale=直径；纯色装饰件，不走贴图角色）。</summary>
     private static GameObject Ball(float diameter, Vector3 pos, Color color, Transform parent)
     {
         var go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
@@ -643,12 +654,23 @@ internal static class ArrowTowerModel
         return go;
     }
 
+    /// <summary>木/瓦角色的部件色抖动（W3B）：VarBucket(位置) → ±3% 亮度乘数；Flat（铁/石/旗/羽）原样。
+    /// 同件恒同桶（位置不变）=模板重建幂等；邻近件大概率异桶=破 94 块同色的均匀感。</summary>
+    private static Color Varied(Color c, Vector3 p, TowerTextures.Role role)
+    {
+        if (role == TowerTextures.Role.Flat) return c;
+        var mul = 1f + (ArrowTowerFxMath.VarBucket(p.x, p.y, p.z) - 1) * 0.03f;
+        return new Color(c.r * mul, c.g * mul, c.b * mul, c.a);
+    }
+
     /// <summary>4 棱锥手写网格（5 顶点/基座方角在对角线；面片双面各发一套顶点防绕向误判——
     /// 顶点极少量翻倍，免除 Unity 顺/逆时针绕向规则的歧义风险）。用于塔顶与箭头锥（T8 箭矢模板
     /// 经 internal 复用，免重复手写网格）。轴向：锥沿 +y（euler 转位）；箭头处传 E(0,0,-90) 使 +y → +x
-    ///（塔载上膛箭）/ E(90,0,0) 使 +y → +z（T8 飞行箭沿 +z 朝前）。</summary>
+    ///（塔载上膛箭）/ E(90,0,0) 使 +y → +z（T8 飞行箭沿 +z 朝前）。fixwave3 W3B：补 UV（每侧面三角
+    /// (0,0)(1,0)(0.5,1)，图元自带 cube UV 对锥面无意义）——塔顶 Role.Roof 挂瓦纹图必需；箭头锥
+    /// Flat 不受影响。</summary>
     internal static void Pyramid(float radius, float height, Vector3 pos, Color color, Transform parent,
-        Vector3 euler)
+        Vector3 euler, TowerTextures.Role role = TowerTextures.Role.Flat)
     {
         var s = radius * 0.70710678f;                    // r=对角半径 → 方底半边
         var v0 = new Vector3(s, 0, s); var v1 = new Vector3(s, 0, -s);
@@ -656,6 +678,7 @@ internal static class ArrowTowerModel
         var apex = new Vector3(0, height, 0);
         var side = new[] { (v0, v1), (v1, v2), (v2, v3), (v3, v0) };
         var verts = new List<Vector3>(8);
+        var uvs = new List<Vector2>(8);
         var tris = new List<int>(24);
         for (var pass = 0; pass < 2; pass++)             // 双绕向两套顶点（set0 正绕/set1 反绕）
         {
@@ -665,12 +688,16 @@ internal static class ArrowTowerModel
                 verts.Add(pass == 0 ? a : c);
                 verts.Add(pass == 0 ? c : a);
                 verts.Add(apex);
+                uvs.Add(new Vector2(0f, 0f));            // 每侧面同一 UV 三角：底两角 (0,0)(1,0)，锥尖 (0.5,1)
+                uvs.Add(new Vector2(1f, 0f));
+                uvs.Add(new Vector2(0.5f, 1f));
                 tris.Add(b); tris.Add(b + 1); tris.Add(b + 2);
                 b += 3;
             }
         }
         var mesh = new Mesh();
         mesh.vertices = verts.ToArray();
+        mesh.uv = uvs.ToArray();
         mesh.triangles = tris.ToArray();
         mesh.RecalculateNormals();
 
@@ -681,7 +708,7 @@ internal static class ArrowTowerModel
         tr.SetParent(parent, false);
         tr.localPosition = pos;
         tr.localEulerAngles = euler;
-        go.GetComponent<MeshRenderer>().sharedMaterial = Mat(color);
+        go.GetComponent<MeshRenderer>().sharedMaterial = Mat(Varied(color, pos, role), role);
     }
 
     /// <summary>红燕尾旗手写网格（燕尾缺口在旗梢；双面；pivot=旗杆轴 → 「Flag」子物体供 T8 摆动）。</summary>
@@ -720,17 +747,77 @@ internal static class ArrowTowerModel
         go.GetComponent<MeshRenderer>().sharedMaterial = Mat(color);
     }
 
-    // ── 材质（7 档共享色材质；底材质三级降级链，见类头）────────────────────────────
+    // ── 材质（7 档共享色材质；底材质三级降级链，见类头；fixwave3 W3B 起按角色挂程序化贴图）──
 
-    private static Material Mat(Color color)
+    private static Material Mat(Color color) => Mat(color, TowerTextures.Role.Flat);
+
+    /// <summary>逐色+逐角色克隆材质（fixwave3 W3B）：缓存键=(色, 贴图角色)——木/瓦角色挂 TowerTextures
+    /// 亮度图（三档木色经 _BaseColor 乘色共用一张木纹图）并按角色设 _BaseMap_ST 平铺；Flat（铁/石/旗/羽）
+    /// 纯色零贴图。色抖动（±3% 亮度桶）在 Box/Ball/Pyramid 建件时拍进 color，缓存自然分桶不膨胀。</summary>
+    private static Material Mat(Color color, TowerTextures.Role role)
     {
-        if (Mats.TryGetValue(color, out var m) && m != null) return m;
+        var key = (color, role);
+        if (Mats.TryGetValue(key, out var m) && m != null) return m;
         if (_baseMat == null) _baseMat = MakeBaseMaterial();
         var mat = new Material(_baseMat);                // 逐色克隆一份（互不串色）
         if (mat.HasProperty("_BaseColor")) mat.SetColor("_BaseColor", color);
         if (mat.HasProperty("_Color")) mat.SetColor("_Color", color);
-        Mats[color] = mat;
+        ApplyTexture(mat, role);
+        Mats[key] = mat;
         return mat;
+    }
+
+    /// <summary>按角色挂程序化贴图 + 平铺（W3B）：URP 走 _BaseMap（URP Lit _BaseMap × _BaseColor 同色相乘
+    /// =灰度亮度图语义）；兜底 shader（Sprites/Default 等）走 mainTexture/mainTextureScale。贴图建不出
+    /// （TowerTextures 返 null）=自动退纯色。首次挂图打一行 trace（材质升级重挂不打——底图引用同张）。</summary>
+    private static bool _texTraced;
+
+    private static void ApplyTexture(Material mat, TowerTextures.Role role)
+    {
+        try
+        {
+            if (role == TowerTextures.Role.Flat) return;
+            var tex = TowerTextures.TexOf(role);
+            if (tex == null) return;
+            var st = TowerTextures.ScaleOf(role);
+            if (mat.HasProperty("_BaseMap"))
+            {
+                mat.SetTexture("_BaseMap", tex);
+                mat.SetTextureScale("_BaseMap", st);
+                mat.SetTextureOffset("_BaseMap", Vector2.zero);
+            }
+            else
+            {
+                mat.mainTexture = tex;
+                mat.mainTextureScale = st;
+            }
+            if (!_texTraced)
+            {
+                _texTraced = true;
+                EndlessGuardPlugin.Trace("[Tower][tex] material textured role=" + role + " shader=" + mat.shader.name);
+            }
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[Tower][tex] apply: " + e.Message); }
+    }
+
+    /// <summary>从旧材质反推贴图角色（W3B 材质升级重染用）：看 _BaseMap/mainTexture 引用是哪张程序图，
+    /// 木纹再按 ST 平铺分大/小件组——重染后角色与平铺原样保留。</summary>
+    private static TowerTextures.Role RoleOfMat(Material m)
+    {
+        try
+        {
+            if (m == null) return TowerTextures.Role.Flat;
+            var tex = m.HasProperty("_BaseMap") ? m.GetTexture("_BaseMap") : m.mainTexture;
+            if (tex == null) return TowerTextures.Role.Flat;
+            if (TowerTextures.Roof != null && tex == TowerTextures.Roof) return TowerTextures.Role.Roof;
+            if (TowerTextures.Wood != null && tex == TowerTextures.Wood)
+            {
+                var st = m.HasProperty("_BaseMap") ? m.GetTextureScale("_BaseMap") : m.mainTextureScale;
+                return st.x > 1.05f ? TowerTextures.Role.PlankBig : TowerTextures.Role.PlankSmall;
+            }
+        }
+        catch { }
+        return TowerTextures.Role.Flat;
     }
 
     /// <summary>底材质四级降级链（F2 改版 + fixwave2 克隆源卫生化）：

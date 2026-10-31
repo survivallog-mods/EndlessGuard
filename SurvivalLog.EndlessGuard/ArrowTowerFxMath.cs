@@ -83,4 +83,14 @@ internal static class ArrowTowerFxMath
         else if (a <= -180f) a += 360f;
         return a;
     }
+
+    /// <summary>fixwave3 W3B 木件色调抖动桶（纯函数，单测覆盖）：由部件局部位置决定性地取 0/1/2，
+    /// 调用方映射为 ±3% 亮度乘数（0→0.97 / 1→1.00 / 2→1.03），破"94 块同色方块"的均匀感。
+    /// 邻近部件位置连续变化 → 哈希雪崩使相邻件大概率落不同桶；同件重建（同位置）恒同桶=幂等。</summary>
+    public static int VarBucket(float x, float y, float z)
+    {
+        var h = (int)(x * 17.31f) ^ (int)(y * 29.71f) ^ (int)(z * 41.13f);
+        h ^= h >> 7;
+        return ((h % 3) + 3) % 3;
+    }
 }

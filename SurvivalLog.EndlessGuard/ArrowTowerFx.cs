@@ -373,7 +373,8 @@ internal sealed class ArrowTowerFx : MonoBehaviour
             t.SetActive(false);
             Object.DontDestroyOnLoad(t);
             var tr = t.transform;
-            ArrowTowerModel.Box(new Vector3(0.02f, 0.02f, 0.26f), Vector3.zero, ArrowTowerModel.ArrowShaft, tr);            // 杆
+            ArrowTowerModel.Box(new Vector3(0.02f, 0.02f, 0.26f), Vector3.zero, ArrowTowerModel.ArrowShaft, tr,
+                role: TowerTextures.Role.PlankSmall);             // 杆（fixwave3 W3B：木纹杆，与塔体箭杆同款）
             ArrowTowerModel.Pyramid(0.02f, 0.06f, new Vector3(0f, 0f, 0.13f), ArrowTowerModel.IronLight, tr,
                 new Vector3(90f, 0f, 0f));                        // 锥头（+y→+z 转位），base 贴杆前端、apex z=0.19
             ArrowTowerModel.Box(new Vector3(0.004f, 0.035f, 0.07f), new Vector3(0f, 0f, -0.09f), ArrowTowerModel.FletchCream, tr);  // 双羽
