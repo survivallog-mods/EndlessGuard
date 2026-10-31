@@ -15,7 +15,7 @@ public sealed class EndlessGuardPlugin : BasePlugin
 {
     public const string Guid = "com.local.survivallog.endlessguard";
     public const string Name = "EndlessGuard";
-    public const string Version = "1.7.0"; // 跟随套件 version.json（作者定号）
+    public const string Version = "1.8.0"; // 版本权威=本仓 csproj（cf05441 裁决），作者定号
 
     internal static ManualLogSource Log;
     internal static ConfigEntry<bool> Enabled;

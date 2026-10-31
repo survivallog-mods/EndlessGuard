@@ -3,7 +3,7 @@
 > 本文件只记本 mod 的更新；套件/安装器版本史见总仓根 CHANGELOG.md。
 > 版本号单源：总仓 version.json 的 mods 字段（作者定义）。
 
-## 待定（作者定号）（2026-10-30）
+## 1.8.0（2026-11-01）
 
 - **新功能：防御设备经验升级**（spec `docs/superpowers/specs/2026-10-30-defense-upgrade-arrowtower-design.md`）：
   - 五件防御设备（沙包/尖刺障碍/电网/机械电锯/箭塔）打怪、承伤、击杀攒经验逐级成长：武器类
