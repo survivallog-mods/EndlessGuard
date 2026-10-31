@@ -339,7 +339,7 @@ internal static class ArrowTower
         if (_iconReady != null) return _iconReady == true;   // 判定过（成败均定版）→ 直接复用，不再碰盘
         try
         {
-            var root = Path.GetFullPath(Path.Combine(BepInEx.Paths.BepInExRootPath, "..", ".."));   // BepInEx 上溯两级=游戏根
+            var root = Path.GetFullPath(Path.Combine(BepInEx.Paths.BepInExRootPath, ".."));          // BepInEx 上溯一级=游戏根（原两级少一层，2026-11-01 实机 trace 实证修正）
             var resDir = Path.Combine(root, "SurvivalLog_Data", "StreamingAssets", "WebUI", "Res");
             if (!Directory.Exists(resDir))
             {
