@@ -246,7 +246,7 @@ internal static class TowerSelDiag
                 var now = Time.unscaledTime;
                 if (now < _posUntil && now >= _nextPosAt)
                 {
-                    _nextPosAt = now + 30f;                // 5 分钟窗内每 30s 重投（相机移动后的新坐标）
+                    _nextPosAt = now + 10f;                // 自测期每 10s 重投（原 30s 对迭代平移太慢）
                     DumpScreenPos();
                 }
                 return;
@@ -308,7 +308,7 @@ internal static class TowerSelDiag
 
         // 3b：登记投点对 + 开 5 分钟重投窗，对比完成的同一刻先投第一轮
         _posOfficial = official; _posTower = tower;
-        _posUntil = Time.unscaledTime + 300f;
+        _posUntil = Time.unscaledTime + 1800f;   // 自测期常开 30 分钟（原 5 分钟窗口对迭代平移太短）
         _nextPosAt = Time.unscaledTime;
         DumpScreenPos();
     }
