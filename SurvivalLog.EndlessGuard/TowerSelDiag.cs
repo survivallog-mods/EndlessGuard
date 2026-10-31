@@ -219,7 +219,12 @@ internal static class TowerSelDiag
             }
             if (ReferenceEquals(amm, _seenAmm))
             {
-                if (!_cmpDone) return;                     // 稳态：其余帧一次引用比较即出
+                if (!_cmpDone)                             // 修自锁：单例首见即登记后 TryCompare 永不再跑；未完成对比时同引用也要 1s 步进
+                {
+                    _acc += Time.unscaledDeltaTime;
+                    if (_acc >= 1f) { _acc = 0f; TryCompare(amm); }
+                    return;
+                }
                 var now = Time.unscaledTime;
                 if (now < _posUntil && now >= _nextPosAt)
                 {
