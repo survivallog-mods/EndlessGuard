@@ -27,6 +27,11 @@ namespace SurvivalLog.EndlessGuard;
 /// GameLayer.Furniture（读不到退层名，再退不动+trace）；一次性取证 dump 在 TowerModelDiag（官方设备
 /// 与我方塔各一次，含 AgentModelManager 注册探针）。W3B：程序化木纹/瓦纹贴图（TowerTextures）按
 /// 贴图角色挂材质（Mat(color, role)），木件 ±3% 亮度桶抖动破均匀感（ArrowTowerFxMath.VarBucket）。
+/// fixwave4（playtest round-4 裁定）：模型重构为官方 TowerDevice 状态组契约——根直下互斥
+/// State01/State02/State03/StateBroken（各 Mesh/G_Tripo05X），仅 State01 激活；语义=耐久分层
+///（Furniture_TowerDeviceStateCheck：STATE01_PERCENT=0.7 / STATE02_PERCENT=0.3；死亡=StateBroken；
+/// 供电外观另走 SyncTowerDeviceModelState(bool)，dump.cs:376481）。布局-防御选取/悬停名/耐久 FSM
+/// 通路依赖此契约（wave3 实证 Collider 已注册而不可选中=缺状态组）。
 ///
 /// ══ Spike 结论（2026-10-31，对 10-29 现行 build 实测：Il2CppDumper 重跑现行 GameAssembly.dll +
 /// global-metadata.dat 得现行 script.json，Iced（suite/tools/disasm_tool）全链逐条核读）══
@@ -58,8 +63,9 @@ namespace SurvivalLog.EndlessGuard;
 /// fixwave2 起根上有唯一 BoxCollider（官方选取=物理射线，实测缺它塔无法点选/搬动/卸装）——散件图元
 /// Collider 仍逐个拆除（旧裁定的"相争"指散件物理体，罩体是官方设备模型的同款形态）。被移除时官方
 /// 归还路径 AddCache 会因 objDict 无此 obj 而直接 DestroyImmediate——等于干净销毁，无泄漏。
-/// T8 动画锚点：弩机整件为根下名为「Head」的直接子物体（旋转部，pivot 在平台中央）；旗子为
-/// 「Flag」直接子物体（pivot 在旗杆轴）——T8 只动这两个。
+/// T8 动画锚点（fixwave4 更新）：弩机整件为 State01/Mesh/G_Tripo05A 下名为「Head」的直接子物体
+///（旋转部，pivot 在平台中央）；旗子为同层「Flag」（pivot 在旗杆轴）——T8 只动这两个；Fx 在
+/// 【当前激活状态组】内锚定（仅 State01 期有效，见 ArrowTowerFx）。
 /// 校验口径（C1 加固）：VerifyPatches 双重核验=①三重载 postfix 在挂（PatchInfo.Postfixes）②我方
 /// Postfix 的 __result 参数 IsByRef（ref 缺失=回写无效的静态防线）；运行时自证=首次 supply trace 带
 /// instanceID（postfix 内打印≠回写成功的终证是场景出现该实例而非兜底盒，作者试玩核对）。
@@ -110,7 +116,8 @@ internal static class ArrowTowerModel
             var via = VerifyPatches()
                 ? "Harmony postfix LoadGameObject×3(miss→supply, __result ref 已核验)"
                 : "POSTFIX 未在挂/回写核验失败（interop 漂移？）——实机将显示官方兜底盒";
-            EndlessGuardPlugin.Trace("[Tower] model prefab built (parts=" + CountDescendants(Template.transform)
+            EndlessGuardPlugin.Trace("[Tower] model prefab built (states=4 State01/02/03/Broken"
+                                     + ", parts=" + CountDescendants(Template.transform)
                                      + ", collider=Box(0.9,1.9,0.9)@y0.95"
                                      + ", via=" + via + ")");
         }
@@ -294,7 +301,9 @@ internal static class ArrowTowerModel
     }
 
     /// <summary>mesh 包围盒估高（F3）：全部 MeshFilter 的 sharedMesh.bounds 8 角点经 localToWorldMatrix
-    /// 变换取 y 极差——不依赖 renderer.bounds 的剔除/可见性懒更新，新建未渲染帧也可测。</summary>
+    /// 变换取 y 极差——不依赖 renderer.bounds 的剔除/可见性懒更新，新建未渲染帧也可测。
+    /// fixwave4：GetComponentsInChildren 默认只取激活子树=状态组下恰只量激活的 State01 全量塔身（口径正确，
+    /// 失活克隆/残骸不计入）。</summary>
     private static float MeshHeight(GameObject go)
     {
         try
@@ -378,6 +387,8 @@ internal static class ArrowTowerModel
 
     /// <summary>重染后代（F2 升级路径）：每 renderer 的旧材质读回色值 → Mat(色, 旧材质反推的角色) 从新底
     /// 重建并回挂——fixwave3 W3B 起角色感知，贴图与平铺在材质升级（Sprites/Default→URP）后原样保留。
+    /// fixwave4：按 Transform 递归（childCount/GetChild/GetComponent 与激活态无关）=等价
+    /// GetComponentsInChildren(true)，State02/03/Broken 失活组的克隆 renderer 同样全覆盖。
     /// Template 与已放置塔根共用（结构件材质全走 Mats 缓存这一条路）。internal=ArrowTowerFx 回调重染已放置塔。</summary>
     internal static void RetintDescendants(Transform t)
     {
@@ -407,17 +418,101 @@ internal static class ArrowTowerModel
         return Color.white;
     }
 
-    // ══════════════════════════════ 模板拼装（spec §4.3 结构件清单）═════════════════════════════
+    // ══════════════════════════════ 模板拼装（spec §4.3 结构件清单 + fixwave4 状态组契约）═════════════════════════════
 
-    /// <summary>自底向上拼塔（约 92 件，全 Cube/Sphere 图元去 Collider + 手写 4 棱锥/燕尾旗网格）。
-    /// 静态件全为根直接子物体；旋转部弩机为子物体「Head」；旗子为「Flag」。fixwave3 W3B：木件按
-    /// 大面/小件挂 PlankBig/PlankSmall 程序化木纹，塔顶挂 Roof 瓦纹（铁/石/旗/羽 Flat 纯色）。</summary>
+    /// <summary>fixwave4 重构为官方 TowerDevice 模型契约（playtest round-4 + diag trace 11:46:04）：
+    /// 官方电锯层级=根直下互斥状态组 State01/Mesh/G_Tripo04A、State02/…、State03/…、StateBroken/…，
+    /// 二进制字面量 State01/State02/State03/StateBroken（各 ×3）。语义（dump.cs 实证，不猜）：
+    /// Furniture_TowerDeviceStateCheck（TypeDefIndex 6383）常量 STATE01_PERCENT=0.7、STATE02_PERCENT=0.3、
+    /// args.LastStateKey(string)——按耐久百分比换态：&gt;70%=State01（完好）、30~70%=State02、≤30%=State03
+    ///（重损）；死亡=StateBroken 残骸；供电外观另走 Furniture.SyncTowerDeviceModelState(bool powered)
+    ///（dump.cs:376481）。布局-防御选取/悬停名/耐久通路依赖此状态组契约（wave3 实证：Collider 已注册
+    /// modelCfg=99153 而仍不可选中=缺状态组）。我方结构：State01/Mesh/G_Tripo05A=全量塔身（弩机「Head」、
+    /// 旗「Flag」在内）；State02/Mesh/G_Tripo05B、State03/Mesh/G_Tripo05C=全量静态克隆（Head 不参与动画
+    /// ——控制方裁定）；StateBroken/Mesh/G_Tripo05D=残骸堆。仅 State01 激活（FSM 按名切换开闭）。
+    /// 性能注：3 份全量克隆 ≈280 对象/塔——少数塔可承受；未来 LOD/共享化候选（裁定留档）。
+    /// W3B 贴图角色不变（克隆共享同一批缓存材质；Retint 按 Transform 递归，失活组同样覆盖）。</summary>
     private static void BuildTemplate()
     {
         Template = new GameObject(ArrowTower.ResName);
         Template.SetActive(false);                       // 模板永不直发（Supply 每次派发 clone 并转正）
         Object.DontDestroyOnLoad(Template);
         var t = Template.transform;
+
+        var s1 = NewStateGroup(t, "State01");            // 完好态（唯一激活组，Fx 动画锚所在）
+        var a = NewStateMesh(s1, "G_Tripo05A");
+        BuildTowerBody(a);
+
+        var s2 = NewStateGroup(t, "State02");            // 耐久 30~70% 外观 = 全量静态克隆
+        var bMesh = NewStateMesh(s2, "G_Tripo05B");
+        var b = CloneTower(a, "G_Tripo05B");
+        if (b != null) b.SetParent(bMesh, false);
+        s2.gameObject.SetActive(false);
+
+        var s3 = NewStateGroup(t, "State03");            // 耐久 ≤30% 外观 = 全量静态克隆
+        var cMesh = NewStateMesh(s3, "G_Tripo05C");
+        var c = CloneTower(a, "G_Tripo05C");
+        if (c != null) c.SetParent(cMesh, false);
+        s3.gameObject.SetActive(false);
+
+        var sB = NewStateGroup(t, "StateBroken");        // 死亡残骸（简堆，总高 ≈0.3）
+        var dMesh = NewStateMesh(sB, "G_Tripo05D");
+        BuildDebris(dMesh);
+        sB.gameObject.SetActive(false);
+
+        // ── 选择碰撞体（fixwave2 起在根上；wave3 diag-reg 实证 AgentModel 收编根 Collider=注册链闭合，
+        // wave4 补状态组=选取/悬停 FSM 通路闭合）：罩住塔身（占地 1×1=一格，高 1.9；旗杆/顶饰球略超出
+        // 不计入）。子物件图元的 Collider 仍在 Box/Ball/Pyramid 里逐个拆除（防 FSM 相争旧裁定只针对
+        // 散件碰撞体；根上这一个罩体=官方同款可选中形态）。
+        var col = Template.AddComponent<BoxCollider>();
+        col.size = new Vector3(0.9f, 1.9f, 0.9f);
+        col.center = new Vector3(0f, 0.95f, 0f);
+    }
+
+    /// <summary>根直下状态组节点 StateXX（官方 FSM SetModelState/按名开闭契约，dump.cs 字面量）。</summary>
+    private static Transform NewStateGroup(Transform root, string name)
+    {
+        var go = new GameObject(name);
+        go.transform.SetParent(root, false);
+        return go.transform;
+    }
+
+    /// <summary>状态组内「Mesh / G_Tripo05X」两层包装（镜像官方 State01/Mesh/G_Tripo04A 层级形态）。</summary>
+    private static Transform NewStateMesh(Transform group, string nodeName)
+    {
+        var mesh = new GameObject("Mesh");
+        mesh.transform.SetParent(group, false);
+        var node = new GameObject(nodeName);
+        node.transform.SetParent(mesh.transform, false);
+        return node.transform;
+    }
+
+    /// <summary>全量塔身克隆（State02/03 用）：材质/贴图共享同一批缓存件（W3B），名字抹掉 Instantiate 的
+    /// " (Clone)" 后缀。克隆件保持激活（可见性由状态组开闭管，FSM 只切组；组失活=整组隐藏）。
+    /// 返 null=克隆异常（该组留空壳——FSM 切过去无显示不炸，模板重建自愈）。</summary>
+    private static Transform CloneTower(Transform body, string newName)
+    {
+        try
+        {
+            var obj = Object.Instantiate(body.gameObject);
+            var go = obj.TryCast<GameObject>();
+            if (go == null) return null;
+            go.name = newName;
+            return go.transform;
+        }
+        catch (Exception e)
+        {
+            EndlessGuardPlugin.Trace("[Tower] clone " + newName + ": " + e.Message);
+            return null;
+        }
+    }
+
+    /// <summary>全量塔身（≈92 件，全 Cube/Sphere 图元去 Collider + 手写 4 棱锥/燕尾旗网格），挂在
+    /// State01/Mesh/G_Tripo05A 下；旋转部弩机为直接子物体「Head」（pivot 平台中央）、旗为「Flag」
+    ///（pivot 旗杆轴）——fixwave4 起二者在 State01 组内，Fx 于激活组内锚定。fixwave3 W3B：木件按
+    /// 大面/小件挂 PlankBig/PlankSmall 程序化木纹，塔顶挂 Roof 瓦纹（铁/石/旗/羽 Flat 纯色）。</summary>
+    private static void BuildTowerBody(Transform t)
+    {
         var PB = TowerTextures.Role.PlankBig;            // 木纹大面 (1.5,1.5)
         var PS = TowerTextures.Role.PlankSmall;          // 木纹小件 (1,1)
         var RF = TowerTextures.Role.Roof;                // 瓦纹 (1.5,1.5)
@@ -506,13 +601,23 @@ internal static class ArrowTowerModel
         foreach (var x in tailX)
             Box(new Vector3(0.018f, 0.02f, 0.018f), P(x, 0.09f, 0.075f), FletchCream, h); // 箭尾羽帽×3
 
-        // ── 选择碰撞体（fixwave2，playtest 实证缺它=塔无法点选/搬动/卸装——官方选取走物理射线，
-        // 官方设备模型全部可射线命中）：根上唯一 BoxCollider，罩住塔身（占地 1×1=一格，高 1.9；
-        // 旗杆/顶饰球略超出不计入，命中体不必贴满视觉件）。子物件图元的 Collider 在 Box/Ball/Pyramid
-        // 里逐个拆除（防 FSM 相争的旧裁定只针对散件碰撞体；根上这一个罩体=官方同款可选中形态）。
-        var col = Template.AddComponent<BoxCollider>();
-        col.size = new Vector3(0.9f, 1.9f, 0.9f);
-        col.center = new Vector3(0f, 0.95f, 0f);
+        // （选择碰撞体不在塔身内——fixwave4 起塔身是状态组的内层，根上唯一 BoxCollider 见 BuildTemplate 尾部。）
+    }
+
+    /// <summary>StateBroken 残骸堆（G_Tripo05D）：8 件倾倒/半埋箱体+散板（木深/中色，PlankSmall 木纹）
+    /// + 2 铁件，总高 ≈0.3；欧拉角全确定性（无随机），每次重建同形。</summary>
+    private static void BuildDebris(Transform t)
+    {
+        var PS = TowerTextures.Role.PlankSmall;
+        Box(new Vector3(0.34f, 0.2f, 0.3f), P(0.04f, 0.1f, 0.02f), WoodDark, t, E(12, 25, -8), PS);    // 主残堆
+        Box(new Vector3(0.22f, 0.14f, 0.26f), P(-0.16f, 0.07f, -0.12f), WoodMid, t, E(-14, -30, 10), PS);
+        Box(new Vector3(0.18f, 0.1f, 0.18f), P(0.2f, 0.05f, -0.18f), WoodDark, t, E(20, 70, 15), PS);
+        Box(new Vector3(0.26f, 0.08f, 0.2f), P(-0.05f, 0.04f, 0.22f), WoodMid, t, E(-8, 100, -12), PS);
+        Box(new Vector3(0.3f, 0.025f, 0.07f), P(0.28f, 0.015f, 0.12f), WoodDark, t, E(0, 40, 3), PS);   // 散板×3
+        Box(new Vector3(0.26f, 0.025f, 0.06f), P(-0.3f, 0.015f, 0.05f), WoodMid, t, E(2, -65, -4), PS);
+        Box(new Vector3(0.22f, 0.025f, 0.06f), P(0.1f, 0.012f, -0.3f), WoodDark, t, E(-3, 15, 5), PS);
+        Box(new Vector3(0.12f, 0.05f, 0.07f), P(-0.22f, 0.03f, -0.26f), IronDark, t, E(18, -15, 22));   // 铁件×2
+        Ball(0.05f, P(0.3f, 0.03f, -0.05f), IronDark, t);
     }
 
     /// <summary>供给实例的选择碰撞体兜底（fixwave2）：Instantiate 原样带模板 BoxCollider；此处只兜

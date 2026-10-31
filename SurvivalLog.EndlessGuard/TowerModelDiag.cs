@@ -120,9 +120,36 @@ internal static class TowerModelDiag
                                      + " layer=" + _ours.gameObject.layer + " (mirror target="
                                      + SafeFurnitureLayer() + ")");
             DumpTree(_ours, ArrowTower.ResName);
+            DumpStateGroups(_ours);
         }
         catch (Exception e) { EndlessGuardPlugin.Trace("[Tower][diag] ours: " + e.Message); }
         TryRegistrationProbe();
+    }
+
+    /// <summary>我方塔状态组在位摘要（fixwave4 一行带出）：根直下 StateXX 激活态；契约=仅 State01 on
+    ///（官方 FSM 按耐久换组，语义见 ArrowTowerModel.BuildTemplate）。</summary>
+    private static void DumpStateGroups(Transform root)
+    {
+        try
+        {
+            var sb = new System.Text.StringBuilder("[Tower][diag] ours state groups:");
+            var found = 0;
+            for (int i = 0; i < root.childCount; i++)
+            {
+                var c = root.GetChild(i);
+                if (c == null) continue;
+                string n = null;
+                try { n = c.name; } catch { }
+                if (n == null || !n.StartsWith("State", StringComparison.Ordinal)) continue;
+                found++;
+                var on = false;
+                try { on = c.gameObject.activeSelf; } catch { }
+                sb.Append(' ').Append(n).Append(on ? "=on" : "=off");
+            }
+            sb.Append(" (found=").Append(found).Append("/4, 契约=仅 State01 on)");
+            EndlessGuardPlugin.Trace(sb.ToString());
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[Tower][diag] stateGroups: " + e.Message); }
     }
 
     /// <summary>注册探针（一次性）：我方塔的 Collider 是否进了官方 colliderId→AgentModel 索引。

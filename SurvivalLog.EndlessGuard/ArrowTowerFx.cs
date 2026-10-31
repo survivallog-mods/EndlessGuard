@@ -37,9 +37,11 @@ namespace SurvivalLog.EndlessGuard;
 /// 注册表（免逐帧 GetAllAgent——那是 DeviceXpRuntime.OnStep 2s 的活）：Dictionary&lt;家具id, TowerFx&gt;。
 /// 喂养源=①DeviceXpRuntime.OnStep 巡检（其 DevicesInPlay 已每 2s 枚举在场设备，顺手 NoteTower）
 /// +②DeviceFired 开火即注；清理=Update 每 2s 一轮 GetAgent 查活（查无/IsDead 即删；家具重建的新 id
-/// 由喂养源重灌）。变换解析：Root=TransformComponent.transform（interop 公开属性），
-/// Head/Flag=根的直接子物体按名锚定（模板结构保证）；未解析/模型未生成期每 0.5s 重试，官方兜底盒
-/// （无 Head/Flag）天然空转不报错。
+/// 由喂养源重灌）。变换解析（fixwave4 状态组契约，模板=根直下 State01/02/03/Broken 互斥组）：先在根
+/// 直下找【当前激活的状态组】，动画锚 Head/Flag 只在激活组=State01 时于组内按名解析（State02/03=全量
+/// 静态克隆、StateBroken=残骸——控制方裁定 Fx 不得动画 State02 的头）；激活组漂移（断电/耐久掉档/修复）
+/// 在 0.5s 重试轮检出并重锚，非 State01 期 Head=null → 逐塔动画静默空转。未解析/模型未生成期同 0.5s
+/// 重试；官方兜底盒（无状态组）天然空转不报错。
 ///
 /// cfg 门（裁决）：整组件创建只挂 Defense.ArrowTowerEnabled——FX 属塔本体；懒建点=ArrowTower.OnStep
 /// （表注入稳态，2s 节奏，模板/材质三级降级链此时已就绪；比 EndlessGuardPlugin.Load 干净：Load 期
@@ -159,12 +161,14 @@ internal sealed class ArrowTowerFx : MonoBehaviour
         // 注册表陈旧清理：agent 查无/死亡 → 删（拆除/摧毁；重建的新 id 由喂养源重灌）
         if (cleanupPass && !AgentAlive(t.Id)) return true;
 
-        // 变换解析：Root 没抓到（模型未生成/场景切换重建）→ 半秒一Retry；Root 在而锚点缺（官方兜底盒）→ 同轮重试
+        // 变换解析：Root 没抓到（模型未生成/场景切换重建）→ 半秒一Retry；Root 在而（激活状态组漂移 ∨
+        // 锚点缺）→ 同轮重锚。漂移=官方 FSM 切了激活组（State01↔02/03/Broken，fixwave4 契约）；重锚后
+        // 非 State01 激活期 Head/Flag=null → 动画静默空转（State02 静头不动画，控制方裁定）。
         if (t.Root == null)
         {
             if (!resolvePass || !TryResolve(t)) return false;    // 未解析轮零 il2cpp 动画调用
         }
-        else if ((t.Head == null || t.Flag == null) && resolvePass)
+        else if (resolvePass && (StateGroupChanged(t) || t.Head == null || t.Flag == null))
         {
             TryResolveChildren(t);
         }
@@ -476,23 +480,22 @@ internal sealed class ArrowTowerFx : MonoBehaviour
         catch { return false; }
     }
 
-    /// <summary>Head/Flag 锚定：模板结构保证二者为根的直接子物体（ArrowTowerModel.BuildTemplate 裁决）。</summary>
+    /// <summary>Head/Flag 锚定（fixwave4 状态组契约）：先取根直下【当前激活的状态组】记入 t.ActiveGroup；
+    /// 仅激活组=State01（完好态）时在组内按名解析动画锚（Head=弩机/Flag=旗，State01/Mesh/G_Tripo05A 直
+    /// 子物体，模板结构保证）——State02/03（静态克隆）与 StateBroken（残骸）激活期锚点=null，逐塔动画
+    /// 静默空转（State02 静头不动画，控制方裁定）。官方兜底盒（无状态组）同样空转；State01 在而锚点缺
+    /// 才打一次性告警。</summary>
     private static void TryResolveChildren(TowerFx t)
     {
         try
         {
             var root = t.Root;
             if (root == null) return;
+            var group = FindActiveStateGroup(root);
+            t.ActiveGroup = group;
+            var normal = group != null && string.Equals(group.name, StateNormal, StringComparison.Ordinal);
             Transform head = null, flag = null;
-            for (int i = 0; i < root.childCount; i++)
-            {
-                var c = root.GetChild(i);
-                if (c == null) continue;
-                var n = c.name;
-                if (head == null && n == "Head") head = c;
-                else if (flag == null && n == "Flag") flag = c;
-                if (head != null && flag != null) break;
-            }
+            if (normal) FindAnchors(group, ref head, ref flag);
             t.Head = head;
             t.Flag = flag;
             if (head != null)
@@ -502,11 +505,81 @@ internal sealed class ArrowTowerFx : MonoBehaviour
                 t.HeadBaseScale = head.localScale;
             }
             if (flag != null) t.FlagBaseEuler = flag.localEulerAngles;
-            if (head == null || flag == null)
-                TraceOnce("[TowerFx] anchor miss（官方兜底盒？）: "
+            if (normal && (head == null || flag == null))
+                TraceOnce("[TowerFx] anchor miss（State01 在而锚点缺，模板异常？）: "
                           + (head == null ? "Head " : "") + (flag == null ? "Flag" : ""));
         }
         catch (Exception e) { TraceOnce("[TowerFx] resolveChildren: " + e.Message); }
+    }
+
+    /// <summary>完好态组名（唯一挂动画锚的状态组；语义=durability&gt;70%，见 ArrowTowerModel.BuildTemplate）。</summary>
+    private const string StateNormal = "State01";
+
+    /// <summary>根直下当前激活的状态组（StateXX 互斥激活；无=官方兜底盒/全暗异常）。</summary>
+    private static Transform FindActiveStateGroup(Transform root)
+    {
+        for (int i = 0; i < root.childCount; i++)
+        {
+            var c = root.GetChild(i);
+            if (c == null) continue;
+            try
+            {
+                if (c.gameObject.activeInHierarchy && IsStateGroupName(c.name)) return c;
+            }
+            catch { }
+        }
+        return null;
+    }
+
+    private static bool IsStateGroupName(string n) =>
+        n == "State01" || n == "State02" || n == "State03" || n == "StateBroken";
+
+    /// <summary>组内按名递归找 Head/Flag（模板=组/Mesh/G_Tripo05A 直下，深度 3 止；先到先得）。</summary>
+    private static void FindAnchors(Transform group, ref Transform head, ref Transform flag)
+    {
+        for (int i = 0; i < group.childCount; i++)
+        {
+            var c = group.GetChild(i);
+            if (c == null) continue;
+            ScanAnchors(c, ref head, ref flag, 0);
+            if (head != null && flag != null) return;
+        }
+    }
+
+    private static void ScanAnchors(Transform t, ref Transform head, ref Transform flag, int depth)
+    {
+        try
+        {
+            var n = t.name;
+            if (head == null && n == "Head") { head = t; return; }
+            if (flag == null && n == "Flag") { flag = t; return; }
+            if (depth >= 3) return;
+            for (int i = 0; i < t.childCount; i++)
+            {
+                var c = t.GetChild(i);
+                if (c == null) continue;
+                ScanAnchors(c, ref head, ref flag, depth + 1);
+                if (head != null && flag != null) return;
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>激活状态组漂移检测（fixwave4）：当前激活组与缓存 t.ActiveGroup 不同（断电→State02、
+    /// 掉档→State03、死亡→StateBroken、修复回 State01、或旧组被毁）=true 触发重锚。半秒一轮调用，
+    /// 每塔 ≤5 次 GetChild+名字比较（零分配）。</summary>
+    private static bool StateGroupChanged(TowerFx t)
+    {
+        try
+        {
+            var root = t.Root;
+            if (root == null) return false;
+            var cur = FindActiveStateGroup(root);
+            if (cur == null) return t.ActiveGroup != null;   // 全暗：视为漂移（重锚清锚点）
+            if (t.ActiveGroup == null) return true;          // 首次/组被毁：重锚
+            return !string.Equals(cur.name, t.ActiveGroup.name, StringComparison.Ordinal);
+        }
+        catch { return false; }
     }
 
     /// <summary>trace 节流（同文只发一次；换文重发，FireDevicePatch.WarnOnce 同款）。</summary>
@@ -524,8 +597,9 @@ internal sealed class ArrowTowerFx : MonoBehaviour
     {
         public long Id;
         public Transform Root;           // 家具 Unity 根（TransformComponent.get_transform）
-        public Transform Head;           // 模板锚点「Head」（旋转弩机，pivot=平台中央）
-        public Transform Flag;           // 模板锚点「Flag」（pivot=旗杆轴）
+        public Transform ActiveGroup;    // 当前激活状态组 StateXX（fixwave4；漂移检测基线，State01 期才挂锚）
+        public Transform Head;           // 动画锚点「Head」（State01/Mesh/G_Tripo05A 直下；非 State01 激活期=null）
+        public Transform Flag;           // 动画锚点「Flag」（同上；pivot=旗杆轴）
         public Vector3 HeadBasePos;      // 解析时拍的基准局部位姿（动画只写增量、恒等回写）
         public Vector3 HeadBaseEuler;
         public Vector3 HeadBaseScale;
