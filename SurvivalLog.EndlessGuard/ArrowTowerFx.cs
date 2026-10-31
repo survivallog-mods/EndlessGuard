@@ -350,6 +350,8 @@ internal sealed class ArrowTowerFx : MonoBehaviour
         if (_arrowTemplate == null && !BuildArrowTemplate()) return;
 
         var clone = Object.Instantiate(_arrowTemplate);
+        // fixwave7：激活前清扫；traceAlways=false=零工静默（派箭 ~0.67 发/s/塔，防 trace 刷屏）
+        ArrowTowerModel.SweepHierarchy(clone, "arrow", out _, traceAlways: false);
         var tr = clone.transform;
         var from = t.Head != null
             ? t.Head.TransformPoint(new Vector3(MuzzleLocalX, MuzzleLocalY, 0f))
@@ -383,6 +385,7 @@ internal sealed class ArrowTowerFx : MonoBehaviour
                 new Vector3(90f, 0f, 0f));                        // 锥头（+y→+z 转位），base 贴杆前端、apex z=0.19
             ArrowTowerModel.Box(new Vector3(0.004f, 0.035f, 0.07f), new Vector3(0f, 0f, -0.09f), ArrowTowerModel.FletchCream, tr);  // 双羽
             ArrowTowerModel.Box(new Vector3(0.035f, 0.004f, 0.07f), new Vector3(0f, 0f, -0.09f), ArrowTowerModel.FletchCream, tr);
+            ArrowTowerModel.SweepHierarchy(t, "arrowTemplate", out _);   // fixwave7：箭矢模板同为 DontDestroyOnLoad 常驻件，同口径清扫
             _arrowTemplate = t;
             EndlessGuardPlugin.Trace("[TowerFx] arrow template built");
             return true;

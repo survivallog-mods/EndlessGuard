@@ -44,6 +44,18 @@ namespace SurvivalLog.EndlessGuard;
 /// 补齐防按名切换落空）；ShowState/ModelAnimator 默认 ctor=共享空桩（RVA 0x60BF70）字段全 null →
 /// 补非空空表防官方侧遍历 NRE。EnsureModelContract 幂等（模板建一次克隆继承 + 每次供给核验，
 /// Instantiate 原生重映射 HeadBar/CenterPoint/Renderers 引用）。详见 EnsureModelContract 方法注。
+/// fixwave7（射线拦截野碰撞体根治，2026-10-31 live raycast 取证）：[SEL] 实证 Default(0) 层「Cube (N)」
+/// 野碰撞体横在防线附近把世界射线吃掉（mcfg=- 未注册→点选全灭）。防御纵深加固=SweepHierarchy：
+/// 全层级（GetComponentsInChildren&lt;Transform&gt;(true) 含失活状态组）逐子件剥 Collider + 全链层镜像
+/// （GameLayer.Furniture，层名兜底），幂等（二遍 stripped=0）；隐藏模板根补失活自证。调用点全覆盖：
+/// BuildTemplate 尾 / SupplyCore 激活前+契约 attach 后 / EnsureGoodMaterial 重染尾 / 箭矢模板建+派发
+///（ArrowTowerFx）。图元创建收口 NewPrimitive（CreatePrimitive 后即时剥，剥空=interop 偶发则一次性
+/// 告警——剥失败不再静默出厂）。Sweep 统一 Object.Destroy（模板/实例同为运行时构建，延帧销毁落在
+/// 失活期=激活前零窗口；创建期唯一例外用 DestroyImmediate——新图元尚在世界原点裸奔，延帧即成
+/// 「原点带碰撞体 Cube」一帧活体，恰是本案症状签名）。诊断注：我方图元名=裸「Cube/Sphere」
+///（Instantiate 只加 "(Clone)"，除 Flag/G_Tripo05X/锚点外从不改名）——「Cube (N)」带号名不匹配我方
+/// 任何命名路径，疑混有官方兜底盒/池化生成件；本轮先保证我方侧零贡献，残存命中由 946a128 的
+/// root=/path= 取证行继续归属。
 ///
 /// ══ Spike 结论（2026-10-31，对 10-29 现行 build 实测：Il2CppDumper 重跑现行 GameAssembly.dll +
 /// global-metadata.dat 得现行 script.json，Iced（suite/tools/disasm_tool）全链逐条核读）══
@@ -284,9 +296,11 @@ internal static class ArrowTowerModel
             var instObj = Object.Instantiate(Template);
             inst = instObj == null ? null : instObj.TryCast<GameObject>();
             if (inst == null) return fallback;
+            SweepHierarchy(inst, "instance", out _);                         // fixwave7：激活前清扫（失活期剥 Collider=零射线窗口）
             inst.SetActive(true);                                            // 镜像官方命中路径（SetActive(true)）
             EnsureSelectableCollider(inst);                                  // fixwave2：选择碰撞体兜底（正常=零写）
             var contract = EnsureModelContract(inst, out var contractAdded); // fixwave6：官方根契约核验
+            SweepHierarchy(inst, "instance", out _);                         // fixwave7：契约 attach 后复查（锚点/补件落 Default 层在此归位）
             MirrorSelectableStructure(inst);                                 // fixwave3 W3A：全链镜像官方层（选取射线层掩码，见方法注）
             TowerModelDiag.NoteSuppliedTower(inst.transform);                // fixwave3 W3A：登记实例供一次性取证 dump
             if (root != null)
@@ -429,7 +443,11 @@ internal static class ArrowTowerModel
             }
             _baseMat = better;
             Mats.Clear();                             // 逐色缓存全部作废（Retint 按 OldMat 色值经 Mat() 重建=新底）
-            if (Template != null) RetintDescendants(Template.transform);
+            if (Template != null)
+            {
+                RetintDescendants(Template.transform);
+                SweepHierarchy(Template, "template", out _);   // fixwave7：重染尾再核验（重建路径同样不出野碰撞体）
+            }
             try { ArrowTowerFx.RetintRootsAndResetArrowTemplate(); }
             catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] retint roots: " + e.Message); }
             EndlessGuardPlugin.Trace("[Tower] material upgraded in-scene: " + better.shader.name);
@@ -541,6 +559,12 @@ internal static class ArrowTowerModel
             _templateContract = "fail:" + e.Message;
             EndlessGuardPlugin.Trace("[Tower] template contract: " + e.Message);
         }
+
+        // ── fixwave7 收尾兜底：全层级清扫（子件 Collider 逐个剥 + 含失活组全链层镜像，幂等）+
+        // 模板根失活自证——隐藏模板绝不带活碰撞体/活根（DontDestroyOnLoad 场景常驻，一处活 Collider
+        // =原点常驻射线拦截件）。幂等：克隆继承前最后核验一遍，Supply 侧每次供给再核验。
+        SweepHierarchy(Template, "template", out _);
+        EnsureTemplateDormant(Template);
     }
 
     /// <summary>根直下状态组节点 StateXX（官方 FSM SetModelState/按名开闭契约，dump.cs 字面量）。</summary>
@@ -787,6 +811,72 @@ internal static class ArrowTowerModel
         }
     }
 
+    // ══════════════ fixwave7：全层级碰撞体清扫 + 层镜像加固（射线拦截野碰撞体根治）══════════════
+    //
+    // 取证（2026-10-31 live raycast probe）：[SEL] hits=5 i1=Cube (24)@0 d=16.04 mcfg=- …——Default(0)
+    // 层野碰撞体横在防线附近吃掉世界射线（MouseRaycastService 层掩码先撞它→mcfg=-→点选链在到达设备
+    // Collider 前就断）。我方图元创建点（Box/Ball/Pyramid/Flag）虽即时剥 Collider，但整条供给链没有
+    // 【后置核验】：任一 DestroyImmediate 偶发落空（interop GetComponent 返空包装即静默 no-op）、或
+    // 契约/重染路径未来新增带碰撞体节点，都会无声出厂。本函数=幂等终检，覆盖全部产出点（调用点见各处）。
+
+    /// <summary>全层级清扫（fixwave7，幂等）：遍历 root 全部 Transform（GetComponentsInChildren(true)
+    /// 含失活状态组 State02/03/04/Broken），①非根子件上有任意 Collider 即 Object.Destroy（模板/实例
+    /// 同为运行时构建，统一 Destroy；延帧销毁落在本帧=激活前失活期，物理射线零窗口——根上唯一
+    /// BoxCollider 罩体保留，那是官方设备模型同款选取注册件）；②全链层镜像 GameLayer.Furniture
+    ///（ResolveFurnitureLayer 双兜底，层不可读=只跳层修复不回退）——含 MirrorSelectableStructure
+    /// 早退分支漏掉的「后挂节点」（契约锚点 HeadBar/CenterPoint 由 new GameObject 建出时落 Default 层，
+    /// 实例修复路径下根已 Furniture→Mirror 幂等早退→锚点永居 Default；本函数无早退全量归位）。
+    /// 返回剥掉的 Collider 数（层修复数走 out）；每次调用打一行 trace——traceAlways=false 仅供箭矢
+    /// 高频路径（派箭 ~0.67 发/s/塔）按 nonzero 静默。异常全吞+trace：清扫失败绝不拖垮供给。</summary>
+    internal static int SweepHierarchy(GameObject root, string tag, out int layerFixed, bool traceAlways = true)
+    {
+        layerFixed = 0;
+        var stripped = 0;
+        if (root == null) return 0;
+        try
+        {
+            var layer = ResolveFurnitureLayer();
+            var rootT = root.transform;
+            var all = rootT.GetComponentsInChildren<Transform>(true);   // 含失活组——野碰撞体常藏失活克隆
+            foreach (var tr in all)
+            {
+                if (tr == null) continue;
+                var go = tr.gameObject;
+                if (!ReferenceEquals(tr, rootT))
+                {
+                    var cols = go.GetComponents<Collider>();            // 逐件全剥（GetComponent 只回首个）
+                    foreach (var c in cols)
+                    {
+                        if (c == null) continue;
+                        Object.Destroy(c);                              // 见方法注：统一 Destroy（激活前失活期零窗口）
+                        stripped++;
+                    }
+                }
+                if (layer >= 0 && go.layer != layer)
+                {
+                    go.layer = layer;
+                    layerFixed++;
+                }
+            }
+            if (traceAlways || stripped > 0 || layerFixed > 0)
+                EndlessGuardPlugin.Trace("[Tower] sweep: stripped=" + stripped
+                                         + " layerFixed=" + layerFixed + " on " + tag);
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] sweep: " + e.Message + " on " + tag); }
+        return stripped;
+    }
+
+    /// <summary>隐藏模板根失活自证（fixwave7）：模板若因任何中途异常/未来改动带活根，其根罩体
+    /// BoxCollider 即成 DontDestroyOnLoad 场景原点的活体射线拦截件——一处断言式兜底，幂等零写。</summary>
+    private static void EnsureTemplateDormant(GameObject template)
+    {
+        try
+        {
+            if (template != null && template.activeSelf) template.SetActive(false);
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] template dormant: " + e.Message); }
+    }
+
     // ══════════════ fixwave6：官方模型根契约补齐（ShowState/ModelAnimator/NavMeshObstacle/锚点）══════════════
     //
     // 根因（2026-10-31 live dump 定案）：官方设备模型根组件 = Transform,BoxCollider,NavMeshObstacle,
@@ -958,13 +1048,31 @@ internal static class ArrowTowerModel
         return n;
     }
 
+    /// <summary>图元创建唯一收口（fixwave7）：CreatePrimitive 后【即时】剥 Collider（DestroyImmediate
+    /// ——此刻新图元还在世界原点裸奔、未入树，延帧 Destroy 会让它带碰撞体活过本帧=「原点 Cube 拦射线」
+    /// 症状签名；入树后的清扫统一走 SweepHierarchy 的 Object.Destroy）。剥空（interop 偶发 GetComponent
+    /// 返空包装→静默 no-op 的旧风险面）不再无声出厂：一次性告警 + SweepHierarchy 后置核验兜底。</summary>
+    private static bool _primStripWarned;
+
+    private static GameObject NewPrimitive(PrimitiveType type)
+    {
+        var go = GameObject.CreatePrimitive(type);
+        var col = go.GetComponent<Collider>();
+        if (col != null) Object.DestroyImmediate(col);
+        else if (!_primStripWarned)
+        {
+            _primStripWarned = true;
+            EndlessGuardPlugin.Trace("[Tower] primitive strip miss (Collider=null @create, interop?; sweep 兜底)");
+        }
+        return go;
+    }
+
     /// <summary>Cube 图元（去 Collider，localScale=尺寸，贴共享色/角色材质；木/瓦角色按位置加 ±3% 亮度桶
     /// 抖动破均匀感）。internal=T8 箭矢模板复用。</summary>
     internal static GameObject Box(Vector3 size, Vector3 pos, Color color, Transform parent,
         Vector3? euler = null, TowerTextures.Role role = TowerTextures.Role.Flat)
     {
-        var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        Object.DestroyImmediate(go.GetComponent<Collider>());
+        var go = NewPrimitive(PrimitiveType.Cube);
         var tr = go.transform;
         tr.SetParent(parent, false);
         tr.localPosition = pos;
@@ -977,8 +1085,7 @@ internal static class ArrowTowerModel
     /// <summary>Sphere 图元（去 Collider，localScale=直径；纯色装饰件，不走贴图角色）。</summary>
     private static GameObject Ball(float diameter, Vector3 pos, Color color, Transform parent)
     {
-        var go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-        Object.DestroyImmediate(go.GetComponent<Collider>());
+        var go = NewPrimitive(PrimitiveType.Sphere);
         var tr = go.transform;
         tr.SetParent(parent, false);
         tr.localPosition = pos;
@@ -1034,8 +1141,7 @@ internal static class ArrowTowerModel
         mesh.triangles = tris.ToArray();
         mesh.RecalculateNormals();
 
-        var go = GameObject.CreatePrimitive(PrimitiveType.Cube);   // 借图元拿现成 MeshFilter/MeshRenderer
-        Object.DestroyImmediate(go.GetComponent<Collider>());
+        var go = NewPrimitive(PrimitiveType.Cube);                 // 借图元拿现成 MeshFilter/MeshRenderer
         go.GetComponent<MeshFilter>().sharedMesh = mesh;
         var tr = go.transform;
         tr.SetParent(parent, false);
@@ -1047,8 +1153,7 @@ internal static class ArrowTowerModel
     /// <summary>红燕尾旗手写网格（燕尾缺口在旗梢；双面；pivot=旗杆轴 → 「Flag」子物体供 T8 摆动）。</summary>
     private static void Flag(Vector3 pos, Color color, Transform parent)
     {
-        var go = GameObject.CreatePrimitive(PrimitiveType.Cube);   // 借图元拿现成 MeshFilter/MeshRenderer
-        Object.DestroyImmediate(go.GetComponent<Collider>());
+        var go = NewPrimitive(PrimitiveType.Cube);                 // 借图元拿现成 MeshFilter/MeshRenderer
         go.name = "Flag";                                  // T8 摆动锚点名（CreatePrimitive 默认名是 "Cube"）
         var tr = go.transform;
         tr.SetParent(parent, false);
