@@ -20,6 +20,12 @@ namespace SurvivalLog.EndlessGuard;
 /// 已建塔若仍是兜底材质，EnsureGoodMaterial 在每次供给时刻再试升级（设备克隆优先）。
 /// F3：每次供给测世界高（mesh 8 角点+renderer.bounds 双口径 trace 前 3 次），父链非 1 缩放时
 /// 按比例校根，目标 ≈1.9（±15% 死区）。
+/// fixwave3（W3A，2026-10-31 playtest：wave2 加 BoxCollider 后塔仍不可点选/搬动/卸装）：dump.cs 取证
+/// 官方选取管线=物理射线（MouseRaycastService.GetMouseHits，层掩码）→ Collider instanceID →
+/// AgentModelManager.GetModelByColliderId → AgentModel；官方家具模型全链处于 GameLayer.Furniture 层，
+/// 我方图元实例默认 Default(0) 层在掩码外=「碰撞体在而射线永不命中」。镜像：供给实例全链递归设为
+/// GameLayer.Furniture（读不到退层名，再退不动+trace）；一次性取证 dump 在 TowerModelDiag（官方设备
+/// 与我方塔各一次，含 AgentModelManager 注册探针）。
 ///
 /// ══ Spike 结论（2026-10-31，对 10-29 现行 build 实测：Il2CppDumper 重跑现行 GameAssembly.dll +
 /// global-metadata.dat 得现行 script.json，Iced（suite/tools/disasm_tool）全链逐条核读）══
@@ -227,6 +233,8 @@ internal static class ArrowTowerModel
             if (inst == null) return fallback;
             inst.SetActive(true);                                            // 镜像官方命中路径（SetActive(true)）
             EnsureSelectableCollider(inst);                                  // fixwave2：选择碰撞体兜底（正常=零写）
+            MirrorSelectableStructure(inst);                                 // fixwave3 W3A：全链镜像官方层（选取射线层掩码，见方法注）
+            TowerModelDiag.NoteSuppliedTower(inst.transform);                // fixwave3 W3A：登记实例供一次性取证 dump
             if (root != null)
             {
                 inst.transform.SetParent(root.transform, worldStays);        // 重载1 命中路径镜像
@@ -518,6 +526,77 @@ internal static class ArrowTowerModel
             }
         }
         catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] collider: " + e.Message); }
+    }
+
+    // ══════════════════ fixwave3 W3A：官方选取结构镜像（层）══════════════════
+
+    /// <summary>官方选取管线（dump.cs 取证，2026-10-31）：MouseRaycastService.GetMouseHits（TypeDefIndex
+    /// 5064，RVA 0x2FA4180，帧缓存物理射线）→ hit 的 Collider instanceID → AgentModelManager.
+    /// GetModelByColliderId（TypeDefIndex 4794，RVA 0x2F16D70；索引=_modelByColliderId 字典，
+    /// AddColliderIndex RVA 0x2F149D0 由 AgentModel（_collider/_colliderId 字段 0x48/0x40）在模型
+    /// 注册期收编）→ AgentModel → 悬停/选中/菜单。RenovationShowManager.GetDyeCandidate(
+    /// AgentModelManager, int colliderId)（RVA 0x2FA7580）佐证同一条 colliderId 解析路径。
+    /// ⇒ 物理射线走层掩码（GameLayer 类：Furniture/Item/NPC/各 HitLayer 静态层表，TypeDefIndex 553），
+    /// 官方家具模型全部处于 GameLayer.Furniture 层；我方图元实例默认 Default(0) 层=射线掩码外，
+    /// wave2 的 BoxCollider 因此"在而不可点"。镜像：全链（根+全部子孙）设为 GameLayer.Furniture
+    ///（读不到退 LayerMask.NameToLayer("Furniture")，再退=不动并一次性 trace）。改层只在供给时刻
+    /// 对我方实例执行（官方数据/官方实例零触碰）。BoxCollider 保留（AgentModel 收编的是 collider 本体，
+    /// 官方模型同款"模型上带 Collider"形态）。</summary>
+    private static bool _layerTraced;
+
+    private static void MirrorSelectableStructure(GameObject inst)
+    {
+        try
+        {
+            if (inst == null) return;
+            var layer = ResolveFurnitureLayer();
+            if (layer < 0)
+            {
+                if (!_layerTraced)
+                {
+                    _layerTraced = true;
+                    EndlessGuardPlugin.Trace("[Tower] layer mirror: GameLayer.Furniture 不可读（保持 Default，dump 将对照官方层）");
+                }
+                return;
+            }
+            if (inst.layer == layer) return;                    // 幂等：已在目标层零写
+            SetLayerRecursive(inst.transform, layer);
+            if (!_layerTraced)
+            {
+                _layerTraced = true;
+                EndlessGuardPlugin.Trace("[Tower] layer mirrored: 全链 → layer " + layer
+                                         + " (GameLayer.Furniture，官方选取射线层；wave2 不可点选根因=Default 层在射线掩码外)");
+            }
+        }
+        catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] layer mirror: " + e.Message); }
+    }
+
+    /// <summary>官方家具层索引：①GameLayer.Furniture 静态表（游戏自己的映射，权威）；②层名兜底。</summary>
+    private static int ResolveFurnitureLayer()
+    {
+        try
+        {
+            var l = GameCore.HotUpdate.GameLayer.Furniture;
+            if (l >= 0 && l <= 31) return l;
+        }
+        catch { }
+        try
+        {
+            var l = LayerMask.NameToLayer("Furniture");
+            if (l >= 0) return l;
+        }
+        catch { }
+        return -1;
+    }
+
+    private static void SetLayerRecursive(Transform t, int layer)
+    {
+        t.gameObject.layer = layer;
+        for (int i = 0; i < t.childCount; i++)
+        {
+            var c = t.GetChild(i);
+            if (c != null) SetLayerRecursive(c, layer);
+        }
     }
 
     // ── 图元/网格小工具 ────────────────────────────────────────────────────────────

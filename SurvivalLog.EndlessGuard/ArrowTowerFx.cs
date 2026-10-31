@@ -94,11 +94,13 @@ internal sealed class ArrowTowerFx : MonoBehaviour
         _subscribed = true;
     }
 
-    /// <summary>每帧入口：cfg 关=清箭停画（注册表保留，重开即续）；否则排水脉冲队列→逐塔动画→箭矢追踪。</summary>
+    /// <summary>每帧入口：cfg 关=清箭停画（注册表保留，重开即续）；否则排水脉冲队列→逐塔动画→箭矢追踪。
+    /// fixwave3 W3A：先喂一次性取证 dump（TowerModelDiag，完成态零开销）。</summary>
     public void Update()
     {
         try
         {
+            TowerModelDiag.Update(Time.deltaTime);
             if (EndlessGuardPlugin.ArrowTowerEnabled != null && !EndlessGuardPlugin.ArrowTowerEnabled.Value)
             {
                 DespawnAllArrows();
