@@ -179,6 +179,24 @@ internal static class TowerSelDiag
                           + "@" + Get(() => col.gameObject.layer, "GameObject.layer")
                           + " d=" + Get(() => h.distance, "RaycastHit.distance").ToString("0.##")
                           + " mcfg=" + (mcfg >= 0 ? mcfg.ToString() : "-"));
+                if (mcfg < 0)
+                {
+                    // 未注册命中=野碰撞体：打根名+路径（定位归属）
+                    var go = Get(() => col.gameObject, "Collider.gameObject");
+                    var t = Get(() => go.transform, "GameObject.transform");
+                    var path = new System.Text.StringBuilder();
+                    int lvl = 0;
+                    while (t != null && lvl < 6)
+                    {
+                        path.Insert(0, "/" + Get(() => t.name, "Transform.name"));
+                        t = Get(() => t.parent, "Transform.parent");
+                        lvl++;
+                    }
+                    var rootName = "<null>";
+                    var root = Get(() => col.transform.root, "Transform.root");
+                    if (root != null) rootName = Get(() => root.name, "Transform.name");
+                    sb.Append(" root=" + rootName + " path=" + path);
+                }
             }
             EndlessGuardPlugin.Trace(sb.ToString());
         }
