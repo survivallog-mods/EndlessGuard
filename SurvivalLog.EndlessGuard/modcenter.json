@@ -1,5 +1,6 @@
 {
   "mcSpec": 2,
+  "suite": true,
   "id": "com.local.survivallog.endlessguard",
   "display": "囤鼠桃园",
   "en": "EndlessGuard",
