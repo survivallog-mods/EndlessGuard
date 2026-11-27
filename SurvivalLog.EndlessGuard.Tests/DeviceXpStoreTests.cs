@@ -226,4 +226,90 @@ public class DeviceXpStoreTests : IDisposable
         Assert.False(s.TryGet("s1", 36001, "0,0", out var miss3));    // 换 cellKey 不命中
         Assert.Null(miss3);
     }
+
+    // ---- 跨槽账目融合（fixwave6D：自动保存换档名分裂账本的对账回收）----
+
+    [Fact]
+    public void MergeMaxInto_MissingKeyCopiedFromOtherSlots()
+    {
+        // 目标槽缺键：其他槽同键条目拷入（分裂出去的真账回收）
+        var s = new DeviceXpStore(_path);
+        s.Set("old", 99005, "6,-27", 161307, 5);
+        s.Set("old", 36001, "8,-27", 1448, 2);
+
+        var merged = s.MergeMaxInto("new");
+
+        Assert.Equal(2, merged);
+        Assert.True(s.TryGet("new", 99005, "6,-27", out var t));
+        Assert.Equal(161307, t.Xp); Assert.Equal(5, t.Lv);
+        Assert.True(s.TryGet("new", 36001, "8,-27", out var b));
+        Assert.Equal(1448, b.Xp); Assert.Equal(2, b.Lv);
+    }
+
+    [Fact]
+    public void MergeMaxInto_SmallerTargetOverwrittenByLargerSource()
+    {
+        // 目标槽已有半截新账（lv1 xp1001），旧槽真账更大（lv5）→ 整条覆盖（xp/lv 成对，不拼配）
+        var s = new DeviceXpStore(_path);
+        s.Set("new", 99005, "6,-27", 1001, 1);
+        s.Set("old", 99005, "6,-27", 161307, 5);
+
+        var merged = s.MergeMaxInto("new");
+
+        Assert.Equal(1, merged);
+        Assert.True(s.TryGet("new", 99005, "6,-27", out var e));
+        Assert.Equal(161307, e.Xp); Assert.Equal(5, e.Lv);
+    }
+
+    [Fact]
+    public void MergeMaxInto_LargerTargetKept_SourceUntouched()
+    {
+        // 目标槽账更大：不回退；源槽原样保留（不删——误融合可逆）
+        var s = new DeviceXpStore(_path);
+        s.Set("new", 36004, "4,-27", 21036, 5);
+        s.Set("old", 36004, "4,-27", 500, 1);
+
+        var merged = s.MergeMaxInto("new");
+
+        Assert.Equal(0, merged);
+        Assert.True(s.TryGet("new", 36004, "4,-27", out var e));
+        Assert.Equal(21036, e.Xp); Assert.Equal(5, e.Lv);
+        Assert.True(s.TryGet("old", 36004, "4,-27", out var src));
+        Assert.Equal(500, src.Xp);   // 源槽不动
+    }
+
+    [Fact]
+    public void MergeMaxInto_MultipleSourcesTakesLargest()
+    {
+        // 多个分裂槽同键：取 xp 最大者
+        var s = new DeviceXpStore(_path);
+        s.Set("a", 99005, "5,-26", 300, 1);
+        s.Set("b", 99005, "5,-26", 92957, 5);
+        s.Set("c", 99005, "5,-26", 800, 1);
+
+        s.MergeMaxInto("target");
+
+        Assert.True(s.TryGet("target", 99005, "5,-26", out var e));
+        Assert.Equal(92957, e.Xp); Assert.Equal(5, e.Lv);
+    }
+
+    [Fact]
+    public void MergeMaxInto_DifferentPositionKeysDoNotCollide()
+    {
+        // 真·不同档的同类型设备（不同位置）：本档键不被他档键覆盖；他档键拷入本档后
+        // 是"无人位置"（本档无设备在 -9,5）——读取永不命中，无害；源槽原样保留
+        var s = new DeviceXpStore(_path);
+        s.Set("otherSave", 36004, "-9,5", 29215, 5);   // 另一基地坐标
+        s.Set("target", 36004, "4,-27", 10, 1);
+
+        var merged = s.MergeMaxInto("target");
+
+        Assert.Equal(1, merged);   // 仅 -9,5 作为缺失键拷入（无害冗余）
+        Assert.True(s.TryGet("target", 36004, "4,-27", out var e));
+        Assert.Equal(10, e.Xp); Assert.Equal(1, e.Lv);   // 本档原账不动
+        Assert.True(s.TryGet("target", 36004, "-9,5", out var copy));
+        Assert.Equal(29215, copy.Xp);                     // 拷贝件（无人键，读不到）
+        Assert.True(s.TryGet("otherSave", 36004, "-9,5", out var o));
+        Assert.Equal(29215, o.Xp);   // 源槽不动
+    }
 }

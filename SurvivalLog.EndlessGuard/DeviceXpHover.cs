@@ -32,7 +32,7 @@ internal static class DeviceXpHover
     private static MethodBase TargetMethod() =>
         AccessTools.Method(typeof(Furniture), "PushTowerDeviceHoverName", new[] { typeof(bool) });
 
-    private static void Postfix(Furniture __instance)
+    private static void Postfix(Furniture __instance, bool broken)
     {
         try
         {
@@ -46,9 +46,23 @@ internal static class DeviceXpHover
             if (LastTrace.TryGetValue(owner, out var last) && unchecked((uint)(now - last)) < TraceIntervalMs) return;
             if (!DeviceXpRuntime.TryGetLevelInfo(__instance, out var lv, out var xp, out var next)) return;   // 无账目=不打扰
             LastTrace[owner] = now;
+            // fixwave6C 推送名取证（临时诊断）：复算官方推送链的名字（Get_Config_Furniture(row).Name → GetLocalText），
+            // 与 broken 参数一起落 trace——对照 UI 实显判断断点在名字生成（trace≠行名）还是 UI 显示（trace 对而 UI 错）。
+            var pushedName = "";
+            try
+            {
+                var cfgRow = GameCore.HotUpdate.BaseSingleton<GameCore.HotUpdate.ConfigManager>.IsInstanceCreated
+                    ? GameCore.HotUpdate.BaseSingleton<GameCore.HotUpdate.ConfigManager>.Instance?.Get_Config_Furniture(__instance.AgentConfigId)
+                    : null;
+                var rawName = cfgRow?.Name;
+                if (!string.IsNullOrEmpty(rawName))
+                    pushedName = GameCore.HotUpdate.ConstantTextTools.GetLocalText(rawName);
+            }
+            catch { }
             EndlessGuardPlugin.Trace("[XP] hoverinfo cfg=" + DeviceXpMath.BaseCfgOf(__instance.AgentConfigId)
                                      + " row=" + __instance.AgentConfigId
-                                     + " lv=" + lv + " xp=" + xp + "/" + (next < 0 ? "MAX" : next.ToString()));
+                                     + " lv=" + lv + " xp=" + xp + "/" + (next < 0 ? "MAX" : next.ToString())
+                                     + " name=\"" + pushedName + "\" broken=" + broken);
         }
         catch (Exception e) { EndlessGuardPlugin.Trace("[XP] hoverinfo: " + e.Message); }
     }

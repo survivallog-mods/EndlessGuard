@@ -161,9 +161,8 @@ internal static class DeviceXpRuntime
         try
         {
             if (!GateOn()) return;
-            RefreshSlotKey();
-            if (!string.Equals(SlotKey, _stepSlot, StringComparison.Ordinal))
-                _stepSlot = SlotKey;   // 读档/换档：旧粘性/基线状态已随 fixwave2 删除，无需清场
+            EnsureBiteRuleCoverage();   // fixwave6B：咬伤规则覆盖（先于 XP 门——XP 关时派生行也在场，同要可被咬）
+            UpdateSlotLock();           // fixwave6D：进档锁定账本槽 + 跨槽融合（取代每步刷新）
 
             ResetAllLevelsIfArmed();   // 还原模式（cfg Defense.ResetLevels；未开启=一次布尔比较即出）
 
@@ -199,14 +198,113 @@ internal static class DeviceXpRuntime
                     if (Store.TryGet(SlotKey, baseCfg, cellKey, out var e) && e != null) ledgerLv = e.Lv;
                     var expected = DeviceXpMath.ExpectedRowFor(baseCfg, ledgerLv);   // F1：账本=真值，不经 cfg MaxLevel 夹取（只封顶今后升级，不降已有等级）
                     if (expected < 0 || f.AgentConfigId == expected) continue;   // 幂等：一致零写零 trace；脏账本（>5）=-1 同样跳过
+                    var oldRow = f.AgentConfigId;                                // fixwave6：recal 打键+旧行（下次诊断不再盲）
                     f.AgentConfigId = expected;                                  // 补写=换行（官方值权威，无属性直写）
                     ReinitFromRow(f, expected, fullHeal: false);                 // 夹取不白送血（升级路径才满血）
-                    EndlessGuardPlugin.Trace("[XP] recal cfg=" + baseCfg + " lv=" + ledgerLv + " row=" + expected);
+                    EndlessGuardPlugin.Trace("[XP] recal cfg=" + baseCfg + " cell=" + cellKey + " lv=" + ledgerLv + " row=" + expected + " old=" + oldRow);
                 }
                 catch (Exception e) { EndlessGuardPlugin.Trace("[XP] recal probe: " + e.Message); }
             }
         }
         catch (Exception e) { EndlessGuardPlugin.Trace("[XP] step: " + e.Message); }
+    }
+
+    // ===== fixwave6B：咬击攻击规则覆盖（箭塔/派生行被咬 0 伤根治，2026-11-02 反汇编定案）=====
+    // 官方僵尸咬塔设备的伤害不走 Config_TowerDevice，走 GlobalSetting 表 "TowerZombieAttackDevice"
+    // 行的 Params3 串（TowerCombatManager.ParseAttackRules：'Z:dev:dmg' 分号串 → attackRuleTable
+    // [(Z<<32)|dev]=dmg + attackableDeviceIds.Add(dev)；GetDeviceBiteDamage 查表 miss=0 伤）。
+    // 官方串只含 36001..36004：箭塔 99005（我方注入）与全部派生等级行 99112..99155 查表必 miss
+    // ——playtest 症状：箭塔永满血（摆下即 0 伤免疫）、沙包升 Lv2 换派生行后从此不掉血经验也断流。
+    // 修复：把 99005/991xx 追加进 Params3（官方解析器自收编，EnsureAttackRules 检测 raw 变化自动重析）；
+    // 伤害值按官方参照（每僵尸取 36004→36003→36002→36001 首个出现的值）× 各自减伤系数缩放（箭塔 1.0），
+    // 下限 1（官方解析丢弃 dmg≤0 的段=0 伤免疫，绝不允许减伤成长缩到 0）。幂等标记=串含 "99005:"
+    //（官方 id 3600x 不可能误中）；箭塔/XP 功能开关均不管——行在场就要可被咬（Enabled 总开关已在外层）。
+    private const string AttackRuleKey = "TowerZombieAttackDevice";
+    private static bool _biteRuleDone;
+
+    /// <summary>咬伤规则覆盖（OnStep 每 2s 幂等探测；表未装好=下轮再试，行缺失/病态=置 done 打一条不刷屏）。</summary>
+    private static void EnsureBiteRuleCoverage()
+    {
+        if (_biteRuleDone) return;
+        try
+        {
+            var dict = SurvivalLog.ModShared.BagTable.Cm()?._Config_GlobalSetting_Dict;
+            if (dict == null || dict.Count == 0) return;   // 装表中，下轮再试（不置 done）
+            if (!dict.TryGetValue(AttackRuleKey, out var row) || row == null)
+            {
+                _biteRuleDone = true;
+                EndlessGuardPlugin.Trace("[XP] biteRule miss: GlobalSetting 无 " + AttackRuleKey + " 行（表版本差异，跳过）");
+                return;
+            }
+            var raw = row.Params3;
+            if (string.IsNullOrEmpty(raw))
+            {
+                _biteRuleDone = true;
+                EndlessGuardPlugin.Trace("[XP] biteRule miss: " + AttackRuleKey + ".Params3 为空（跳过）");
+                return;
+            }
+            if (raw.Contains("99005:")) { _biteRuleDone = true; return; }   // 已覆盖（幂等；也涵盖重算场景——重启进程后重放）
+
+            // 解析官方条目：'Z:dev:dmg'（容忍空段/坏段——官方解析器自己也会 LogError 跳过，这里静默跳）
+            // perZ[僵尸id] → (设备id → 伤害)；参照 towerRef[僵尸id] = 36004→…→36001 首个出现的伤害。
+            var perZ = new Dictionary<int, Dictionary<int, int>>();
+            var towerRef = new Dictionary<int, int>();
+            var refOrder = new[] { 36004, 36003, 36002, 36001 };
+            var refSeen = new Dictionary<int, int>();   // 已选定的参照来源（防低优先级覆盖高优先级）
+            foreach (var seg in raw.Split(';'))
+            {
+                var p = seg.Trim().Split(':');
+                if (p.Length != 3) continue;
+                if (!int.TryParse(p[0].Trim(), out var z) || !int.TryParse(p[1].Trim(), out var dev) ||
+                    !int.TryParse(p[2].Trim(), out var dmg)) continue;
+                if (!perZ.TryGetValue(z, out var byDev)) perZ[z] = byDev = new Dictionary<int, int>();
+                byDev[dev] = dmg;
+                var rank = Array.IndexOf(refOrder, dev);
+                if (rank >= 0 && dmg > 0 && (!refSeen.TryGetValue(z, out var curRank) || rank < curRank))
+                {
+                    refSeen[z] = rank;
+                    towerRef[z] = dmg;
+                }
+            }
+
+            // 生成追加条目：每僵尸 id（有官方伤害参照者）——箭塔基础行+派生行（系数 1.0）+ 各类设备派生行（各自系数）。
+            var adds = new List<string>();
+            foreach (var z in perZ.Keys)
+            {
+                if (!towerRef.TryGetValue(z, out var tRef)) continue;   // 该僵尸对四件套均无条目：无参照，不造数值
+                foreach (var lv in new[] { 1, 2, 3, 4, 5 })
+                {
+                    var towerRow = DeviceXpMath.RowIdFor(ArrowTowerCfgId, lv);
+                    if (towerRow > 0)
+                        adds.Add(z + ":" + towerRow + ":" + DeviceXpMath.DerivedBiteDamage(tRef, lv, 1.0f));
+                }
+                foreach (var baseCfg in DeviceXpMath.TrackedBaseIds)
+                {
+                    if (baseCfg == ArrowTowerCfgId) continue;   // 箭塔已按上面 tRef 生成
+                    if (!perZ[z].TryGetValue(baseCfg, out var baseDmg) || baseDmg <= 0) continue;   // 官方无该类条目：不造数值
+                    for (var lv = 2; lv <= 5; lv++)   // lv1=基础行，官方条目已在
+                    {
+                        var rowId = DeviceXpMath.RowIdFor(baseCfg, lv);
+                        if (rowId > 0)
+                            adds.Add(z + ":" + rowId + ":" + DeviceXpMath.DerivedBiteDamage(baseDmg, lv, IncomingFactorFor(baseCfg)));
+                    }
+                }
+            }
+            if (adds.Count == 0)
+            {
+                _biteRuleDone = true;
+                EndlessGuardPlugin.Trace("[XP] biteRule skip: 官方串无可参照条目（内容异常，不动）");
+                return;
+            }
+            row.Params3 = raw.TrimEnd(';') + ";" + string.Join(";", adds);
+            _biteRuleDone = true;
+            EndlessGuardPlugin.Trace("[XP] biteRule +" + adds.Count + " 条（箭塔+派生行可被咬；EnsureAttackRules 将自动重析）");
+        }
+        catch (Exception e)
+        {
+            _biteRuleDone = true;   // 病态不重试刷屏；一次 trace 留痕
+            EndlessGuardPlugin.Trace("[XP] biteRule: " + e.Message);
+        }
     }
 
     /// <summary>Defense.ResetLevels 还原模式（fixwave2 卸载安全网）：派生行随 dll 消失，留档设备的
@@ -320,8 +418,52 @@ internal static class DeviceXpRuntime
         }
     }
 
+    // ===== fixwave6D：SlotKey 进档锁定 + 跨槽账目融合 =====
+    // 事故（2026-11-03 凌晨 playtest 实锤）：游戏自动保存会创建新档名（Save_时间戳.bytes），
+    // GetLastPlayFileName 随即指向新名——旧实现每步刷新 SlotKey，一场游玩的账目被劈进多个
+    // "实际同一进程线"的槽；切槽瞬间账本全体 miss，巡检把全部已升级设备按 lv1 打回基础行
+    // （trace 00:09:52 recal lv=1 ×9，lv5 箭塔 99155→99005、lv2 沙包 99112→36001）。
+    // 修复：SlotKey 只在"世界从无到有"（进档瞬间，AgentsListReady 翻真）时刷新一次并整局锁定
+    //（自动保存换名不再影响）；进档后首轮做一次跨槽融合（Store.MergeMaxInto：其余槽同键账按
+    // xp 最大并入本槽）——分裂在旧档名槽里的真账回收，等级失而复得。回主菜单/读档半程
+    //（ready=false）解锁，下次进档重新锁定+融合。Award/TryGetLevelInfo 里的散装 RefreshSlotKey
+    // 全部移除（它们会在保存后拿到新档名，正是病灶）。
+    private static bool _agentsLive;      // 当前是否处于世界在场状态（进档后 true）
+    private static bool _mergedForSlot;   // 本局（当前锁定槽）已完成跨槽融合
+
+    /// <summary>进档锁定+融合（OnStep 每步调用；ready 边沿驱动，稳态成本=一次就绪探测）。</summary>
+    private static void UpdateSlotLock()
+    {
+        var live = AgentsListReady();
+        if (live && !_agentsLive)
+        {
+            // 进档瞬间：锁定本局槽名 + 清 cellKey 绑定表（设备全体重建）+ 一次性跨槽融合
+            RefreshSlotKey();
+            _cellKeys.Clear();
+            _stepSlot = SlotKey;
+            _mergedForSlot = false;
+        }
+        if (live && !_mergedForSlot)
+        {
+            _mergedForSlot = true;
+            try
+            {
+                var merged = Store.MergeMaxInto(SlotKey);
+                if (merged > 0)
+                {
+                    _dirty = true;   // 融合即落盘（下轮巡检冲刷）
+                    EndlessGuardPlugin.Trace("[XP] slotMerge +" + merged + " 条并入 " + SlotKey);
+                }
+            }
+            catch (Exception e) { EndlessGuardPlugin.Trace("[XP] slotMerge: " + e.Message); }
+        }
+        if (!live) { _agentsLive = false; _mergedForSlot = false; }   // 主菜单/读档半程：解锁，待下次进档
+        else _agentsLive = true;
+    }
+
     /// <summary>存档槽标识刷新：GameSaveManager.GetLastPlayFileName（interop 无字面 SaveFileName，取同型公开成员；
-    /// 单例不可达/异常/空值一律保留现值，冷启动自然落在 "default"）。</summary>
+    /// 单例不可达/异常/空值一律保留现值，冷启动自然落在 "default"）。
+    /// fixwave6D 起**只在进档锁定时机调用**（UpdateSlotLock）——保存动作会令该 API 返回新档名，战斗中调用即切槽事故。</summary>
     public static void RefreshSlotKey()
     {
         try
@@ -351,7 +493,6 @@ internal static class DeviceXpRuntime
             if (f == null) return false;
             var baseCfg = DeviceXpMath.BaseCfgOf(f.AgentConfigId);
             if (!DeviceXpMath.IsTrackedDevice(baseCfg)) return false;
-            RefreshSlotKey();
             if (!Store.TryGet(SlotKey, baseCfg, CellKeyOf(f), out var e) || e == null) return false;
             lv = Math.Max(1, e.Lv);
             xp = e.Xp;
@@ -379,7 +520,6 @@ internal static class DeviceXpRuntime
             var baseCfg = DeviceXpMath.BaseCfgOf(furn.AgentConfigId);
             if (!DeviceXpMath.IsTrackedDevice(baseCfg)) return;
             var cellKey = CellKeyOf(furn);
-            RefreshSlotKey();
             var entry = Store.GetOrNew(SlotKey, baseCfg, cellKey);
             if (entry.Lv < 1) entry.Lv = 1;   // GetOrNew 新建条目默认 0 → 初始 Lv1（不触发 lvup 行）
             var newXp = entry.Xp + amount;
@@ -421,7 +561,7 @@ internal static class DeviceXpRuntime
             f.AgentConfigId = derived;                // 唯一写入：换配置行（游戏自己的存档系统会带上它）
             ReinitFromRow(f, derived, fullHeal: true);
             RecordPulse(f.InstanceId);
-            EndlessGuardPlugin.Trace("[XP] lvup cfg=" + baseCfg + " lv=" + lv + " row=" + derived);
+            EndlessGuardPlugin.Trace("[XP] lvup cfg=" + baseCfg + " cell=" + CellKeyOf(f) + " lv=" + lv + " row=" + derived);   // fixwave6：带 cell（分裂诊断）
         }
         catch (Exception e) { EndlessGuardPlugin.Trace("[XP] applyLevel: " + e.Message); }
     }
@@ -536,16 +676,32 @@ internal static class DeviceXpRuntime
     }
 
     /// <summary>家具 cellKey：TransformComponent.Position 四舍五入 "x,z"；不可达退化 ownerId（裁决注明）。
-    /// internal=悬停进度 trace 要打账本键字符串（DeviceXpHover 同装配）。</summary>
+    /// internal=悬停进度 trace 要打账本键字符串（DeviceXpHover 同装配）。
+    /// fixwave6 滞回绑定（键抖动根治，2026-11-02 playtest）：设备原点恰在格线 .5 边界时
+    /// （电锯阵 x≈12.5/4.5/8.5 实锤）战斗帧读数微抖即令四舍五入在两格间横跳，同一台设备的
+    /// 经验被劈进两条账、两条账各自升级+巡检各自纠偏——等级/耐久来回跳的直接根因。修复：
+    /// 每台设备（运行时 InstanceId 索引）首次取键即绑定（键+当时坐标），此后坐标未搬离 ≥1 格
+    /// （DeviceXpMath.ShouldRebindCellKey，切比雪夫）一律返回绑定键——ε 抖动被粘住；真搬走才换键
+    /// （新位置新账，维持 spec"位置=设备身份"语义）。读档/换档设备全体重建（NewInstanceId 重分配），
+    /// 绑定表随 slot 切换清空（OnStep _stepSlot 分支），防 InstanceId 复用串账。绑定记录的是设备
+    /// 实际坐标而非键的格坐标——滞回比较不受键本身取舍影响。</summary>
+    private static readonly Dictionary<long, (string Key, float X, float Z)> _cellKeys = new();
+
     internal static string CellKeyOf(Furniture f)
     {
         try
         {
             var tc = GetComponent<TransformComponent>(f);
-            if (tc != null)
+            if (tc != null && f != null)
             {
+                var id = f.InstanceId;
                 var p = tc.Position;
-                return Mathf.RoundToInt(p.x) + "," + Mathf.RoundToInt(p.z);
+                if (_cellKeys.TryGetValue(id, out var bound) &&
+                    !DeviceXpMath.ShouldRebindCellKey(bound.X, bound.Z, p.x, p.z))
+                    return bound.Key;   // 未搬离：粘住绑定键（.5 边界抖动在此被吸收）
+                var key = Mathf.RoundToInt(p.x) + "," + Mathf.RoundToInt(p.z);
+                _cellKeys[id] = (key, p.x, p.z);
+                return key;
             }
         }
         catch { }

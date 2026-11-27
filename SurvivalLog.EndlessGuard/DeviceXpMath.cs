@@ -141,4 +141,22 @@ internal static class DeviceXpMath
     /// <summary>是否可获经验设备（基础名单 36001/36002/36003/36004/99005，或其派生等级行 99112..99155）。</summary>
     internal static bool IsTrackedDevice(int furnitureConfigId) =>
         Array.IndexOf(TrackedBaseIds, furnitureConfigId) >= 0 || IsDerivedRow(furnitureConfigId);
+
+    // ===== cellKey 滞回判定（fixwave6：键抖动根治）=====
+    // 事故（2026-11-02 playtest 实锤）：机械电锯模型原点恰在格线 .5 边界（x≈12.5/4.5/8.5），
+    // 战斗帧位置读数微抖 ε 即令 RoundToInt 在两格间横跳——同一台设备的经验被劈进
+    // "12,-21"/"13,-21" 两条账（trace 同秒并行累积实锤），两条账各自升级、巡检各自纠偏，
+    // AgentConfigId 在 99142↔99143 来回推+每次 Initialize——作者看到的"等级/耐久来回跳跃"。
+    // 修复：CellKeyOf 首次绑定后粘住（本函数=false 保持旧键），任一轴搬离 ≥1 格才换键
+    //（真搬走=新位置新账，维持 spec"位置=设备身份"的既有语义；占地 1 格的家具挪 <1 格
+    // 不是有意义的移动）。切比雪夫距离，免开方；阈值 1.0 与占地同量级。
+    /// <summary>cellKey 是否需要重绑：任一轴位移 ≥1 格（切比雪夫距离；&lt;1=读数抖动，保持旧键）。</summary>
+    internal static bool ShouldRebindCellKey(float boundX, float boundZ, float curX, float curZ) =>
+        Math.Abs(curX - boundX) >= 1f || Math.Abs(curZ - boundZ) >= 1f;
+
+    /// <summary>派生行/箭塔的僵尸咬伤值（fixwave6B）：官方基础行咬伤 × 减伤系数^(lv-1)，
+    /// 四舍五入，下限 1（官方 ParseAttackRules 对伤害 ≤0 的段直接丢弃=该设备被咬 0 伤，
+    /// 减伤成长绝不能把伤害缩到 0）。lv=1（基础行）恒=base。</summary>
+    internal static int DerivedBiteDamage(int baseBiteDamage, int level, float perLevelFactor) =>
+        Math.Max(1, (int)Math.Round(baseBiteDamage * Math.Pow(perLevelFactor, level - 1), MidpointRounding.AwayFromZero));
 }

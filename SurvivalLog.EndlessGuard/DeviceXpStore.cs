@@ -112,6 +112,36 @@ internal sealed class DeviceXpStore
         return n;
     }
 
+    /// <summary>跨槽账目融合（fixwave6D：自动保存换档名分裂账本的对账回收）：把其余槽里同键
+    /// （同 configId#cellKey）的条目按 xp 最大者并入目标槽——目标槽缺失该键则拷入，已有但 xp 较小
+    /// 则被更大的覆盖（整条替换，xp/lv 成对取自同一条，防拼配错位）。返回并入/覆盖条数。
+    /// 背景：游戏自动保存会创建新档名（Save_时间戳.bytes），GetLastPlayFileName 随即指向新名——
+    /// 旧实现账本键随槽名切换，一场游玩的账目被劈进多个"实际同一进程线"的槽；本方法在进档锁定
+    /// 槽后一次性把散账收回来。只按键精确匹配（键含位置），真·不同档的同名设备（不同位置）不受影响。</summary>
+    internal int MergeMaxInto(string targetSlot)
+    {
+        if (string.IsNullOrEmpty(targetSlot)) return 0;
+        if (!_slots.TryGetValue(targetSlot, out var target))
+        {
+            target = new Dictionary<string, DeviceXpEntry>();
+            _slots[targetSlot] = target;
+        }
+        var merged = 0;
+        foreach (var kv in _slots)
+        {
+            if (kv.Key == targetSlot) continue;
+            foreach (var e in kv.Value)
+            {
+                if (!target.TryGetValue(e.Key, out var cur) || cur.Xp < e.Value.Xp)
+                {
+                    target[e.Key] = new DeviceXpEntry { Xp = e.Value.Xp, Lv = e.Value.Lv };
+                    merged++;
+                }
+            }
+        }
+        return merged;
+    }
+
     /// <summary>设备键："configId#cellKey"，如 "36001#12,8"（JSON 形状契约逐字）。</summary>
     private static string DeviceKey(int configId, string cellKey) => $"{configId}#{cellKey}";
 

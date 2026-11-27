@@ -332,4 +332,62 @@ public class DeviceXpMathTests
         // cfg MaxLevel=3：16800 经验（原本 Lv5）只到 Lv3
         Assert.Equal(3, DeviceXpMath.LevelFromXp(16800, 3, DeviceXpMath.ThresholdsDefault));
     }
+
+    // ---- cellKey 滞回（fixwave6：.5 边界抖动分裂账本根治）----
+
+    [Theory]
+    [InlineData(12.49f, -21.3f, 12.51f, -21.3f)]   // x 跨 .5 边界微抖（事故现场）
+    [InlineData(12.5f, -21.0f, 12.5f, -21.01f)]    // z 向微抖
+    [InlineData(4.99f, -27.0f, 5.01f, -27.0f)]     // 4.5/5 边界抖（电锯阵另一事故格）
+    [InlineData(0f, 0f, 0.99f, 0.99f)]             // 双轴各 <1 格的对角挪动
+    [InlineData(12.5f, -21.0f, 12.5f, -21.0f)]     // 完全不动
+    public void ShouldRebindCellKey_MicroJitter_KeepsBoundKey(float bx, float bz, float cx, float cz)
+    {
+        Assert.False(DeviceXpMath.ShouldRebindCellKey(bx, bz, cx, cz));
+    }
+
+    [Theory]
+    [InlineData(12.5f, -21.0f, 13.6f, -21.0f)]     // x 真搬离 ≥1 格
+    [InlineData(12.5f, -21.0f, 12.5f, -22.5f)]     // z 真搬离
+    [InlineData(12.5f, -21.0f, 11.0f, -22.0f)]     // 双轴（切比雪夫：x 差 1.5 触发）
+    [InlineData(-3.2f, 5.0f, -4.3f, 5.0f)]         // 负坐标同规则
+    public void ShouldRebindCellKey_RealMove_Rebinds(float bx, float bz, float cx, float cz)
+    {
+        Assert.True(DeviceXpMath.ShouldRebindCellKey(bx, bz, cx, cz));
+    }
+
+    // ---- 派生行咬伤（fixwave6B：箭塔/派生行不在官方攻击规则串里=被咬 0 伤）----
+
+    [Fact]
+    public void DerivedBiteDamage_LevelOne_EqualsBase()
+    {
+        // lv1（基础行语义）：不缩放
+        Assert.Equal(10, DeviceXpMath.DerivedBiteDamage(10, 1, 0.9f));
+        Assert.Equal(10, DeviceXpMath.DerivedBiteDamage(10, 1, 0.88f));
+    }
+
+    [Fact]
+    public void DerivedBiteDamage_WeaponFactor_ScalesDownPerLevel()
+    {
+        // 武器 0.9/级：10 → lv3 = 10×0.81 = 8.1 → 四舍五入 8
+        Assert.Equal(8, DeviceXpMath.DerivedBiteDamage(10, 3, 0.9f));
+        // lv5 = 10×0.6561 = 6.561 → 7
+        Assert.Equal(7, DeviceXpMath.DerivedBiteDamage(10, 5, 0.9f));
+    }
+
+    [Fact]
+    public void DerivedBiteDamage_TowerFactorOne_NeverScales()
+    {
+        // 箭塔 1.0 系数（无减伤成长裁决）：全等级恒=base
+        for (int lv = 1; lv <= 5; lv++)
+            Assert.Equal(12, DeviceXpMath.DerivedBiteDamage(12, lv, 1.0f));
+    }
+
+    [Fact]
+    public void DerivedBiteDamage_ClampsToMinimumOne()
+    {
+        // 官方解析对伤害 ≤0 的段直接丢弃（=0 伤免疫）——下限 1 封死该路径
+        Assert.Equal(1, DeviceXpMath.DerivedBiteDamage(1, 5, 0.5f));   // 1×0.0625=0.0625 → 夹 1
+        Assert.Equal(1, DeviceXpMath.DerivedBiteDamage(2, 9, 0.5f));   // 越级缩放同夹
+    }
 }
