@@ -215,10 +215,11 @@ internal static class DeviceXpRuntime
     // [(Z<<32)|dev]=dmg + attackableDeviceIds.Add(dev)；GetDeviceBiteDamage 查表 miss=0 伤）。
     // 官方串只含 36001..36004：箭塔 99005（我方注入）与全部派生等级行 99112..99155 查表必 miss
     // ——playtest 症状：箭塔永满血（摆下即 0 伤免疫）、沙包升 Lv2 换派生行后从此不掉血经验也断流。
-    // 修复：把 99005/991xx 追加进 Params3（官方解析器自收编，EnsureAttackRules 检测 raw 变化自动重析）；
-    // 伤害值按官方参照（每僵尸取 36004→36003→36002→36001 首个出现的值）× 各自减伤系数缩放（箭塔 1.0），
-    // 下限 1（官方解析丢弃 dmg≤0 的段=0 伤免疫，绝不允许减伤成长缩到 0）。幂等标记=串含 "99005:"
-    //（官方 id 3600x 不可能误中）；箭塔/XP 功能开关均不管——行在场就要可被咬（Enabled 总开关已在外层）。
+    // 修复：把本 mod 设备（箭塔 99005、磁暴线圈 99006 及其派生行，清单见 ModDevices）追加进 Params3（官方解析器
+    // 自收编，EnsureAttackRules 检测 raw 变化自动重析）；伤害值按官方参照（每僵尸取 36004→36003→36002→36001
+    // 首个出现的值）× 各自减伤系数缩放，下限 1（官方解析丢弃 dmg≤0 的段=0 伤免疫，绝不允许减伤成长缩到 0）。
+    // 幂等标记=串含全部本 mod 设备 id（官方 id 3600x 不可能误中）；设备/XP 功能开关均不管——行在场就要可被咬
+    //（Enabled 总开关已在外层）。
     private const string AttackRuleKey = "TowerZombieAttackDevice";
     private static bool _biteRuleDone;
 
@@ -243,7 +244,9 @@ internal static class DeviceXpRuntime
                 EndlessGuardPlugin.Trace("[XP] biteRule miss: " + AttackRuleKey + ".Params3 为空（跳过）");
                 return;
             }
-            if (raw.Contains("99005:")) { _biteRuleDone = true; return; }   // 已覆盖（幂等；也涵盖重算场景——重启进程后重放）
+            var covered = true;
+            foreach (var d in ModDevices.All) covered &= raw.Contains(d.Id + ":");
+            if (covered) { _biteRuleDone = true; return; }   // 本 mod 设备全部已覆盖（幂等；重启进程后重放）
 
             // 解析官方条目：'Z:dev:dmg'（容忍空段/坏段——官方解析器自己也会 LogError 跳过，这里静默跳）
             // perZ[僵尸id] → (设备id → 伤害)；参照 towerRef[僵尸id] = 36004→…→36001 首个出现的伤害。
@@ -267,20 +270,25 @@ internal static class DeviceXpRuntime
                 }
             }
 
-            // 生成追加条目：每僵尸 id（有官方伤害参照者）——箭塔基础行+派生行（系数 1.0）+ 各类设备派生行（各自系数）。
+            // 生成追加条目：每僵尸 id（有官方伤害参照者）——本 mod 各设备的基础行与派生行（伤害=官方参照 × 各自减伤系数，
+            // 没进经验名单的设备只有基础行），再加官方四件套的派生行（各自系数）。设备清单在 ModDevices，新增设备自动覆盖。
             var adds = new List<string>();
             foreach (var z in perZ.Keys)
             {
                 if (!towerRef.TryGetValue(z, out var tRef)) continue;   // 该僵尸对四件套均无条目：无参照，不造数值
-                foreach (var lv in new[] { 1, 2, 3, 4, 5 })
+                foreach (var d in ModDevices.All)
                 {
-                    var towerRow = DeviceXpMath.RowIdFor(ArrowTowerCfgId, lv);
-                    if (towerRow > 0)
-                        adds.Add(z + ":" + towerRow + ":" + DeviceXpMath.DerivedBiteDamage(tRef, lv, 1.0f));
+                    adds.Add(z + ":" + d.Id + ":" + tRef);
+                    for (var lv = 2; lv <= 5; lv++)
+                    {
+                        var rowId = DeviceXpMath.RowIdFor(d.Id, lv);
+                        if (rowId > 0)
+                            adds.Add(z + ":" + rowId + ":" + DeviceXpMath.DerivedBiteDamage(tRef, lv, IncomingFactorFor(d.Id)));
+                    }
                 }
                 foreach (var baseCfg in DeviceXpMath.TrackedBaseIds)
                 {
-                    if (baseCfg == ArrowTowerCfgId) continue;   // 箭塔已按上面 tRef 生成
+                    if (ModDevices.IsModDevice(baseCfg)) continue;   // 本 mod 设备已按上面 tRef 生成
                     if (!perZ[z].TryGetValue(baseCfg, out var baseDmg) || baseDmg <= 0) continue;   // 官方无该类条目：不造数值
                     for (var lv = 2; lv <= 5; lv++)   // lv1=基础行，官方条目已在
                     {
@@ -298,7 +306,7 @@ internal static class DeviceXpRuntime
             }
             row.Params3 = raw.TrimEnd(';') + ";" + string.Join(";", adds);
             _biteRuleDone = true;
-            EndlessGuardPlugin.Trace("[XP] biteRule +" + adds.Count + " 条（箭塔+派生行可被咬；EnsureAttackRules 将自动重析）");
+            EndlessGuardPlugin.Trace("[XP] biteRule +" + adds.Count + " 条（本 mod 设备+派生行可被咬；EnsureAttackRules 将自动重析）");
         }
         catch (Exception e)
         {

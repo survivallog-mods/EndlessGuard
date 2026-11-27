@@ -24,6 +24,7 @@
     <Compile Include="../ModShared/TeslaFxPainter.cs" />
     <EmbeddedResource Include="scavenge_plans.json" />
     <EmbeddedResource Include="Resources\eg_arrow_tower.png" />
+    <EmbeddedResource Include="Resources\eg_tesla_coil.png" />
   </ItemGroup>
 
   <!-- 单测工程（Task 1 device-xp）：链接 DeviceXpMath.cs 源文件编译，internal 经此可见 -->

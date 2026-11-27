@@ -8,10 +8,17 @@ using Object = UnityEngine.Object;
 namespace SurvivalLog.EndlessGuard;
 
 /// <summary>磁暴线圈模型供应：拦截 BattleResource.LoadGameObject 的 P_TeslaCoil 请求，
-/// 用 bundle 里的 prefab 实例化，克隆游戏 URP Lit 绑 bundle 贴图，挂攻击特效组件。</summary>
+/// 用 bundle 里的 prefab 实例化，克隆游戏 URP Lit 绑 bundle 贴图，补官方模型根契约（DeviceModel，缺了就点不选），
+/// 挂攻击特效组件。</summary>
 internal static class TeslaCoilModel
 {
     private const float InstallScale = 0.56f;   // bundle 内 4.1m → 安装 2.3m
+
+    /// <summary>外形参数（prefab 局部坐标，随安装缩放）：罩体罩住塔身与红板，头栏锚在球顶上方。</summary>
+    private static readonly DeviceModel.Shape CoilShape =
+        new(new Vector3(1.4f, 4.1f, 1.4f), new Vector3(0f, 2.05f, 0f), 4.5f, 2.0f);
+
+    private static bool _contractTraced;
 
     internal static GameObject Template { get; private set; }
 
@@ -57,8 +64,13 @@ internal static class TeslaCoilModel
             }
 
             ApplyMaterials(inst, force: false);
-            EnsureCollider(inst);
-            AttachFx(inst);
+            var contract = DeviceModel.Finalize(inst, CoilShape, "coil", out _);   // 官方根契约（选取/耐久/修理/藤蔓的前提）
+            AttachFx(inst);                                                        // 特效壳后挂：不进 ModelAnimator.Renderers
+            if (!_contractTraced)
+            {
+                _contractTraced = true;
+                Trace("[Coil] contract: " + contract);
+            }
             _spawned++;
             if (_spawned <= 3)
                 Trace("[Coil] model supplied #" + _spawned + " pos=" + inst.transform.position
@@ -177,18 +189,6 @@ internal static class TeslaCoilModel
             }
         }
         catch (Exception e) { Trace("[Coil] material: " + e.Message); }
-    }
-
-    private static void EnsureCollider(GameObject inst)
-    {
-        try
-        {
-            var box = inst.GetComponent<BoxCollider>();
-            if (box == null) box = inst.AddComponent<BoxCollider>();
-            box.center = new Vector3(0f, 1.95f, 0f);
-            box.size = new Vector3(1.5f, 3.9f, 1.5f);
-        }
-        catch (Exception e) { Trace("[Coil] collider: " + e.Message); }
     }
 
     private static void AttachFx(GameObject inst)

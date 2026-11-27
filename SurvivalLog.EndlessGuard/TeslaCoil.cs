@@ -4,7 +4,8 @@ using SurvivalLog.ModShared;
 namespace SurvivalLog.EndlessGuard;
 
 /// <summary>磁暴线圈「99006」：四表内存注入 + 防线 Lv4 解锁登记（结构照抄箭塔 99005，数值按高压塔定位）。
-/// 模型走 bundle prefab（TeslaCoilModel 供应），不走程序化拼装。</summary>
+/// 模型走 bundle prefab（TeslaCoilModel 供应），不走程序化拼装。设备级通用处理（图标落盘、被咬规则、
+/// 模型契约）由 ModDevices / DeviceModel 统一承担，本类只管自己的四行。</summary>
 internal static class TeslaCoil
 {
     internal const int Id = 99006;
@@ -14,8 +15,17 @@ internal static class TeslaCoil
     private const int DefenseLvKey = 4;
     private const string Lv4AppendText = "\\n新增：解锁 磁暴线圈";
     private const int UnpackAction = 100026004;
+    // 图标：专属图标（内嵌 Resources\eg_tesla_coil.png）走 WebUI/Res 磁盘通道，落盘与路径判定在 ModDevices.EnsureIcon；
+    // 落盘不成立时退回官方「木板」图标。
     private const string IconTex = "Assets/RuntimeAssets/Texture/Material/UI_Item_Icon_Mat_M_muban";
     private const string IconWebMat = "../../Res/Material/UI_Item_Icon_Mat_M_muban.png";
+
+    /// <summary>专属图标的 WebUI 相对路径；null=本会话退回木板占位（ModDevices.EnsureIcon 定版）。</summary>
+    private static string _iconWeb;
+
+    private static string IconNow => _iconWeb ?? IconTex;
+    private static string IconWebNow => _iconWeb ?? IconWebMat;
+
     private const string PackageModel = "Assets/RuntimeAssets/Prefabs/Furniture/P_Paperbox_009_S1_M02";
 
     internal static bool TryInjectFast() => EnsureTables();
@@ -33,6 +43,8 @@ internal static class TeslaCoil
         var pl = cm._Config_ProductionList_Dict;
         var dl = cm._Config_DefenseLv_Dict;
         if (td == null || fu == null || it == null || pl == null || dl == null) return false;
+
+        _iconWeb = ModDevices.EnsureIcon(ModDevices.Coil);   // 专属图标落盘先行（结果定图标走专属还是木板退路）
 
         if (SentinelsGreen(td, fu, it, pl, dl))
         {
@@ -116,7 +128,7 @@ internal static class TeslaCoil
         f.Story = 0;
         f.ResName = ResName;
         f.BagResName = "P_WoodBox_02";
-        f.ICON = IconWebMat;
+        f.ICON = IconWebNow;
         f.FurniturePrice = 0;
         f.PawnPrice = 0;
         f.PurchaseRewardSetId = 0;
@@ -205,7 +217,7 @@ internal static class TeslaCoil
         i.IT_Discovery_Exp = 0;
         i.CaptureExp = 0;
         i.ItemFmodPath = "";
-        i.Icon = IconTex; i.WebIcon = IconWebMat;
+        i.Icon = IconNow; i.WebIcon = IconWebNow;
         i.Model = PackageModel;
         i.ConditionSetId = 0;
         i.IsHighDemand = false;
