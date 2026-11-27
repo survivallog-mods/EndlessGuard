@@ -40,6 +40,7 @@ public sealed class EndlessGuardPlugin : BasePlugin
     internal static ConfigEntry<float> SandbagHpStepRatio;
     internal static ConfigEntry<float> SandbagDefFactor;
     internal static ConfigEntry<float> TowerRangeStep;
+    internal static ConfigEntry<bool> TeslaCoilEnabled;
 
     public override void Load()
     {
@@ -66,6 +67,7 @@ public sealed class EndlessGuardPlugin : BasePlugin
         SandbagHpStepRatio = Config.Bind("Defense", "SandbagHpStepRatio", 0.25f, "沙包每级耐久上限 +基础值×此比例（血牛定位，比武器类厚；改后立即重写等级行，设备面板于下次读档/重放时吸收新值）。");
         SandbagDefFactor = Config.Bind("Defense", "SandbagDefFactor", 0.88f, "沙包每级受伤×此系数（0.88=每级减伤 12%，比武器类更能扛；改后立即重写等级行，设备面板于下次读档/重放时吸收新值）。");
         TowerRangeStep = Config.Bind("Defense", "TowerRangeStep", 0.55f, "箭塔射程每级 +此格数（基础射程 3 格，Lv5=3+4×0.55=5.2 格全场大半纵深；改后立即重写等级行，设备面板于下次读档/重放时吸收新值）。");
+        TeslaCoilEnabled = Config.Bind("Defense", "TeslaCoilEnabled", true, "注入新设备「磁暴线圈」：工作台配方（铁皮×3+木片×2+碎玻璃）+ 防线 Lv4 解锁 + 四表数值行（ID 99006，模型走 assetbundle）。false=停止注入；已注入行为进程内存态，重启后干净。");
 
         // 逐类挂载+异常隔离（2026-10-25 事故教训：PatchAll 整包挂载时单个补丁 IL 编译错会炸掉整个
         // Load()——Ticker/loaded 行全没执行，"补丁在跑轮询全无"的残废态。逐类隔离后坏一个不连坐）。
@@ -90,6 +92,7 @@ public sealed class EndlessGuardPlugin : BasePlugin
         var fastGo = new GameObject("EndlessGuard.FastTicker");
         Object.DontDestroyOnLoad(fastGo);
         fastGo.AddComponent<FastInjectTicker>();
+
 
         Trace("loaded：cfg=" + Enabled.Value + "," + PreventNewFalls.Value + "," + RestoreFallenPoints.Value + "," + ExtendScavengePlans.Value
             + "；xp=" + (XPEnabled != null && XPEnabled.Value) + ",tower=" + (ArrowTowerEnabled != null && ArrowTowerEnabled.Value));
@@ -128,6 +131,7 @@ internal sealed class GuardTicker : MonoBehaviour
         try { ScavengePlans.OnConfigStep(); } catch (Exception e) { EndlessGuardPlugin.Trace("ticker ScavengePlans: " + e.Message); }
         try { DeviceXpRuntime.OnStep(); } catch (Exception e) { EndlessGuardPlugin.Trace("ticker DeviceXp: " + e.Message); }
         try { ArrowTower.OnStep(); } catch (Exception e) { EndlessGuardPlugin.Trace("ticker Tower: " + e.Message); }
+        try { TeslaCoil.OnStep(); } catch (Exception e) { EndlessGuardPlugin.Trace("ticker Coil: " + e.Message); }
     }
 }
 
@@ -161,6 +165,7 @@ internal sealed class FastInjectTicker : MonoBehaviour
                 return;
             }
             if (ArrowTower.TryInjectFast()) Retire(trace: true);
+            try { TeslaCoil.TryInjectFast(); } catch (Exception e) { EndlessGuardPlugin.Trace("[Coil] fast-inject: " + e.Message); }
         }
         catch (Exception e) { EndlessGuardPlugin.Trace("[Tower] fast-inject: " + e.Message); }
     }

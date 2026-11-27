@@ -17,6 +17,11 @@
   <ItemGroup>
     <Compile Include="../ModShared/BagTableRw.cs" />
     <Compile Include="../ModShared/WelcomeTip.cs" />
+    <Compile Include="../ModShared/TeslaFxCoilArcs.cs" />
+    <Compile Include="../ModShared/TeslaFxGeo.cs" />
+    <Compile Include="../ModShared/TeslaFxRig.cs" />
+    <Compile Include="../ModShared/TeslaFxMeshes.cs" />
+    <Compile Include="../ModShared/TeslaFxPainter.cs" />
     <EmbeddedResource Include="scavenge_plans.json" />
     <EmbeddedResource Include="Resources\eg_arrow_tower.png" />
   </ItemGroup>
@@ -53,6 +58,10 @@
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
       <HintPath>E:\SteamLibrary\steamapps\common\Survival Log\BepInEx\interop\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AssetBundleModule">
+      <HintPath>E:\SteamLibrary\steamapps\common\Survival Log\BepInEx\interop\UnityEngine.AssetBundleModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.PhysicsModule">

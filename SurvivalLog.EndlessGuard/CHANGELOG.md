@@ -39,6 +39,13 @@
   - 已分裂的旧账（成对相邻条目）不自动合并：修复后设备会稳定绑定其中一条，另一条成为死账
     （无害；介意历史等级差异可开一次 `Defense.ResetLevels` 清账重攒）
 
+- **新防御设备：磁暴线圈（ID 99006）**：
+  - 工作台配方「磁暴线圈包裹」（铁皮×3 + 木片×2 + 碎玻璃），防线 Lv4 解锁；拆封后安装到防御位，需供电
+  - 闪电链攻击：一道闪电最多串联 5 只丧尸（单跳 3 格内），链电穿过躯干逐只传导；攻 26 / 2.2s 一发 / 射程 4.5 格
+  - 模型取自 Sketchfab「Red Alert 2 - Soviet Tesla coil」（CC-BY，作者 Ska-Ara），经 AssetBundle 加载，高 2.3m
+  - 待机时环组上有持续跳动的电弧（线型按红警 2 原版取色与线宽），放电与实际伤害同帧
+  - cfg：`Defense.TeslaCoilEnabled` 开关
+
 ## 1.8.0（2026-11-01）
 
 - **新功能：防御设备经验升级**（spec `docs/superpowers/specs/2026-10-30-defense-upgrade-arrowtower-design.md`）：

@@ -281,8 +281,14 @@ internal static class ArrowTowerModel
         GameObject inst = null;
         try
         {
-            if (fallback != null || path == null ||
-                path.IndexOf(ArrowTower.ResName, StringComparison.Ordinal) < 0) return fallback;
+            if (fallback != null || path == null) return fallback;
+            if (path.IndexOf(TeslaCoil.ResName, StringComparison.Ordinal) >= 0)
+            {
+                var coil = TeslaCoilModel.Supply(path, root, worldStays, localPos, localEuler, localScale);
+                if (coil != null) return coil;
+                return fallback;
+            }
+            if (path.IndexOf(ArrowTower.ResName, StringComparison.Ordinal) < 0) return fallback;
             if (EndlessGuardPlugin.Enabled != null && !EndlessGuardPlugin.Enabled.Value) return fallback;
             if (EndlessGuardPlugin.ArrowTowerEnabled != null && !EndlessGuardPlugin.ArrowTowerEnabled.Value)
                 return fallback;
