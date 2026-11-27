@@ -69,15 +69,7 @@ namespace EGAssets
             model.transform.position = Vector3.zero;
             model.transform.rotation = Quaternion.Euler(0f, 15f, 0f);   // 实机截图里线圈相对机位的偏航
             model.transform.localScale = Vector3.one * Scale;
-            var matRed = Lit(lit, new Color(1.55f, 1.40f, 1.40f), 0.10f, 0.45f);
-            matRed.SetTexture("_BaseMap", Tex("07___Default_1001_albedo.jpg"));
-            var matMetal = Lit(lit, Color.white, 0.70f, 0.74f);
-            matMetal.SetTexture("_BaseMap", Tex("07___Default_1002_albedo.jpg"));
-            foreach (var r in model.GetComponentsInChildren<Renderer>())
-            {
-                var n = r.sharedMaterial != null ? r.sharedMaterial.name : "";
-                r.sharedMaterial = (n.Contains("Metal") || n.Contains("Ball")) ? matMetal : matRed;
-            }
+            EGCoilMaterials.Apply(model);
 
             // 代理丧尸（身高 1.7，躯干中心 0.9）：一部分在线圈与相机之间（z<0），一部分在后方
             var zmat = Lit(lit, new Color(0.46f, 0.50f, 0.38f), 0f, 0.3f);
@@ -214,13 +206,6 @@ namespace EGAssets
             go.transform.position = pos;
             go.transform.localScale = size;
             go.GetComponent<MeshRenderer>().sharedMaterial = mat;
-        }
-
-        private static Texture2D Tex(string name)
-        {
-            var t = AssetDatabase.LoadAssetAtPath<Texture2D>("Assets/TeslaCoilExternal/textures/" + name);
-            if (t == null) throw new Exception("贴图缺失 " + name);
-            return t;
         }
 
         private static Material Lit(Shader lit, Color c, float metallic, float smooth)
