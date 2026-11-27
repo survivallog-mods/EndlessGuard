@@ -1,3 +1,16 @@
 bin/
 obj/
 release/
+
+# 磁暴线圈资产工程（_tools/EGAssets）：Unity 缓存、日志、同步产物不跟踪
+_tools/EGAssets/Library/
+_tools/EGAssets/Temp/
+_tools/EGAssets/Logs/
+_tools/EGAssets/obj/
+_tools/EGAssets/UserSettings/
+_tools/EGAssets/Assets/Shared/
+_tools/EGAssets/*.log
+# 外部模型的原始贴图约 60MB，不入库；来源 Sketchfab「Red Alert 2 - Soviet Tesla coil」（CC-BY，Ska-Ara），重打 bundle 前需放回
+_tools/EGAssets/Assets/TeslaCoilExternal/textures/
+# 离线自测的审核出图
+_candidates/
